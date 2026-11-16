@@ -429,5 +429,3 @@ docker run --rm -v ${PWD}:/app -w /app golang:1.27 go test -v ./internal/consort
 - **Ordem Total Determinística:** A resolução de conflitos concorrentes por assentos utiliza a tupla `(LamportClock, CoordinatorCompanyID)`. Como o identificador da empresa é único no consórcio, assegura-se desempate determinístico sem risco de impasses (*deadlocks*).
 - **Ponto de Não-Retorno:** A decisão de `COMMIT` é registrada no Write-Ahead Log (WAL) com chamada síncrona `fsync` antes do envio das confirmações aos participantes. Em caso de falha de energia, o estado é reconstruído durante a inicialização do nó.
 - **Prevenção do Blocking Problem:** Locks temporizados por TTL nos nós participantes impedem que indisponibilidades prolongadas de nós coordenadores causem bloqueio permanente de vagas.
-#   P B L - 3 - V a i J u n t o - C o n c o r r e n c i a - E - C o n e c t i v i d a d e  
- 
