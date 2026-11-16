@@ -1,0 +1,132 @@
+services:
+  empresa-a:
+    image: vaijunto:local
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: [
+      "/app/bin/api-server",
+      "-data-dir", "/app/storage/data",
+      "-company-id", "empresa-a",
+      "-tcp-addr", ":8080",
+      "-http-addr", ":8081",
+      "-peers", "empresa-b=http://empresa-b:8081,empresa-c=http://empresa-c:8081"
+    ]
+    ports:
+      - "8080:8080"   # Clientes TCP da Empresa A
+      - "8081:8081"   # API REST inter-servidores Empresa A
+    volumes:
+      - empresa-a-storage:/app/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/internal/v1/health || exit 1"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 3s
+    restart: unless-stopped
+
+  empresa-b:
+    image: vaijunto:local
+    command: [
+      "/app/bin/api-server",
+      "-data-dir", "/app/storage/data",
+      "-company-id", "empresa-b",
+      "-tcp-addr", ":8080",
+      "-http-addr", ":8081",
+      "-peers", "empresa-a=http://empresa-a:8081,empresa-c=http://empresa-c:8081"
+    ]
+    ports:
+      - "8082:8080"   # Clientes TCP da Empresa B
+      - "8083:8081"   # API REST inter-servidores Empresa B
+    volumes:
+      - empresa-b-storage:/app/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/internal/v1/health || exit 1"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 3s
+    restart: unless-stopped
+
+  empresa-c:
+    image: vaijunto:local
+    command: [
+      "/app/bin/api-server",
+      "-data-dir", "/app/storage/data",
+      "-company-id", "empresa-c",
+      "-tcp-addr", ":8080",
+      "-http-addr", ":8081",
+      "-peers", "empresa-a=http://empresa-a:8081,empresa-b=http://empresa-b:8081"
+    ]
+    ports:
+      - "8084:8080"   # Clientes TCP da Empresa C
+      - "8085:8081"   # API REST inter-servidores Empresa C
+    volumes:
+      - empresa-c-storage:/app/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/internal/v1/health || exit 1"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
+      start_period: 3s
+    restart: unless-stopped
+
+  # Cliente de terminal para testes manuais interativos
+  # Exemplo de uso: docker compose run --rm client
+  # Para conectar na empresa B: docker compose run --rm client -addr empresa-b:8080
+  # Ou via env var: docker compose run --rm -e VAIJUNTO_SERVER_ADDR=empresa-b:8080 client
+  client:
+    image: vaijunto:local
+    profiles: ["tools"]
+    environment:
+      - VAIJUNTO_SERVER_ADDR=empresa-a:8080
+    entrypoint: ["/app/bin/api-client"]
+    stdin_open: true
+    tty: true
+
+  # Carga inicial de dados de demonstração
+  seed:
+    image: vaijunto:local
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: [
+      "/app/bin/seed",
+      "-servers=empresa-a=empresa-a:8080,empresa-b=empresa-b:8080,empresa-c=empresa-c:8080"
+    ]
+    depends_on:
+      empresa-a:
+        condition: service_healthy
+      empresa-b:
+        condition: service_healthy
+      empresa-c:
+        condition: service_healthy
+
+  # Simulador autônomo sob alta carga de passageiros simultâneos
+  # Executar com: docker compose run --rm simulator
+  simulator:
+    image: vaijunto:local
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    profiles: ["tools"]
+    command: [
+      "/app/bin/simulator",
+      "-companies=empresa-a=empresa-a:8080,empresa-b=empresa-b:8080,empresa-c=empresa-c:8080",
+      "-passengers=30",
+      "-duration=15s"
+    ]
+    depends_on:
+      empresa-a:
+        condition: service_healthy
+      empresa-b:
+        condition: service_healthy
+      empresa-c:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+
+volumes:
+  empresa-a-storage:
+  empresa-b-storage:
+  empresa-c-storage:

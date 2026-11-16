@@ -1,0 +1,314 @@
+package server
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/enum"
+	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/models"
+	"github.com/google/uuid"
+)
+
+func (r *Repository) loadRides() error {
+	var rides []models.Ride
+	if err := readJSONFile(r.ridesPath, &rides); err != nil {
+		return err
+	}
+
+	for _, ride := range rides {
+		if !ride.IsValid() {
+			return errors.New("arquivo de caronas contém um registro inválido")
+		}
+		if _, exists := r.rides[ride.ID]; exists {
+			return errors.New("arquivo de caronas contém identificadores duplicados")
+		}
+
+		rideCopy := ride
+		r.rides[ride.ID] = &rideCopy
+	}
+
+	return nil
+}
+
+func (r *Repository) SaveRide(ride *models.Ride) error {
+	if ride == nil || !ride.IsValid() {
+		return errors.New("carona inválida")
+	}
+
+	r.ridesMu.Lock()
+	defer r.ridesMu.Unlock()
+
+	oldRide, existed := r.rides[ride.ID]
+	r.rides[ride.ID] = cloneRide(ride)
+	if err := r.saveStateLocked(); err != nil {
+		if existed {
+			r.rides[ride.ID] = oldRide
+		} else {
+			delete(r.rides, ride.ID)
+		}
+		return fmt.Errorf("salvar carona: %w", err)
+	}
+
+	return nil
+}
+
+// SaveRideForDriver performs the final vehicle-capacity check while holding the
+// same lock used by vehicle updates and removals.
+func (r *Repository) SaveRideForDriver(ride *models.Ride) error {
+	if ride == nil || !ride.IsValid() {
+		return errors.New("carona inválida")
+	}
+
+	r.driversMu.RLock()
+	defer r.driversMu.RUnlock()
+
+	r.ridesMu.Lock()
+	defer r.ridesMu.Unlock()
+
+	driver, exists := r.drivers[ride.DriverID]
+	if !exists || driver.Vehicle == nil {
+		return errors.New("nenhum veículo cadastrado")
+	}
+	if ride.DriverName == "" && driver.Name != "" {
+		ride.DriverName = driver.Name
+	}
+	for _, stage := range ride.Segments {
+		if stage.AvailableSeats > driver.Vehicle.SeatCapacity {
+			return errors.New("a capacidade da carona excede a capacidade atual do veículo")
+		}
+	}
+
+	oldRide, existed := r.rides[ride.ID]
+	r.rides[ride.ID] = cloneRide(ride)
+	if err := r.saveStateLocked(); err != nil {
+		if existed {
+			r.rides[ride.ID] = oldRide
+		} else {
+			delete(r.rides, ride.ID)
+		}
+		return fmt.Errorf("salvar carona: %w", err)
+	}
+
+	return nil
+}
+
+func (r *Repository) GetRideByID(id uuid.UUID) (*models.Ride, error) {
+	r.ridesMu.RLock()
+	defer r.ridesMu.RUnlock()
+
+	ride, exists := r.rides[id]
+	if !exists {
+		return nil, errors.New("carona não encontrada")
+	}
+
+	c := cloneRide(ride)
+	if c.DriverName == "" {
+		r.usersMu.RLock()
+		if u, ok := r.userByIDLocked(c.DriverID); ok {
+			c.DriverName = u.Name
+		}
+		r.usersMu.RUnlock()
+	}
+
+	return c, nil
+}
+
+// GetRideBySegmentID busca a carona que contém o segmento especificado.
+func (r *Repository) GetRideBySegmentID(segmentID uuid.UUID) (*models.Ride, error) {
+	r.ridesMu.RLock()
+	defer r.ridesMu.RUnlock()
+
+	for _, ride := range r.rides {
+		for _, s := range ride.Segments {
+			if s.ID == segmentID {
+				c := cloneRide(ride)
+				if c.DriverName == "" {
+					r.usersMu.RLock()
+					if u, ok := r.userByIDLocked(c.DriverID); ok {
+						c.DriverName = u.Name
+					}
+					r.usersMu.RUnlock()
+				}
+				return c, nil
+			}
+		}
+	}
+
+	return nil, errors.New("carona contendo o trecho não encontrada")
+}
+
+func (r *Repository) GetRidesByDriverID(driverID uuid.UUID) ([]*models.Ride, error) {
+	r.ridesMu.RLock()
+	defer r.ridesMu.RUnlock()
+
+	rides := make([]*models.Ride, 0)
+	for _, ride := range r.rides {
+		if ride.DriverID == driverID {
+			rides = append(rides, cloneRide(ride))
+		}
+	}
+
+	sort.Slice(rides, func(i, j int) bool {
+		return rides[i].DepartureAt.Before(rides[j].DepartureAt)
+	})
+
+	return rides, nil
+}
+
+func (r *Repository) GetActiveRidesByDate(date time.Time) ([]*models.Ride, error) {
+	r.ridesMu.RLock()
+	defer r.ridesMu.RUnlock()
+
+	r.usersMu.RLock()
+	defer r.usersMu.RUnlock()
+
+	rides := make([]*models.Ride, 0)
+	for _, ride := range r.rides {
+		if !ride.Cancelled && sameCalendarDate(ride.DepartureAt, date) {
+			c := cloneRide(ride)
+			if c.DriverName == "" {
+				if u, ok := r.userByIDLocked(c.DriverID); ok {
+					c.DriverName = u.Name
+				}
+			}
+			rides = append(rides, c)
+		}
+	}
+
+	sort.Slice(rides, func(i, j int) bool {
+		return rides[i].DepartureAt.Before(rides[j].DepartureAt)
+	})
+
+	return rides, nil
+}
+
+func (r *Repository) CancelRide(rideID, driverID uuid.UUID) error {
+	r.ridesMu.Lock()
+	defer r.ridesMu.Unlock()
+
+	r.reservationsMu.Lock()
+	defer r.reservationsMu.Unlock()
+
+	ride, exists := r.rides[rideID]
+	if !exists {
+		return errors.New("carona não encontrada")
+	}
+	if ride.DriverID != driverID {
+		return errors.New("motorista não pode cancelar esta carona")
+	}
+	if ride.Cancelled {
+		return errors.New("carona já está cancelada")
+	}
+
+	affectedReservations, err := r.confirmedReservationsForRideLocked(rideID)
+	if err != nil {
+		return fmt.Errorf("cancelar reservas da carona: %w", err)
+	}
+
+	ride.Cancel()
+	for _, affected := range affectedReservations {
+		affected.reservation.Status = enum.Cancelada
+		for _, stage := range affected.stages {
+			stage.stage.AvailableSeats++
+		}
+	}
+
+	if err := r.saveStateLocked(); err != nil {
+		r.restoreRideCancellation(ride, affectedReservations)
+		return fmt.Errorf("cancelar carona: %w", err)
+	}
+
+	return nil
+}
+
+func sameCalendarDate(first, second time.Time) bool {
+	firstYear, firstMonth, firstDay := first.Date()
+	secondYear, secondMonth, secondDay := second.Date()
+	return firstYear == secondYear && firstMonth == secondMonth && firstDay == secondDay
+}
+
+// DecrementSeatIdempotent decrementa em 1 os assentos disponíveis de um trecho específico
+// garantindo que o mesmo tx_id não provoque dois decrementos, mesmo após falhas ou retransmissões.
+func (r *Repository) DecrementSeatIdempotent(rideID, segmentID uuid.UUID, txID string) error {
+	r.ridesMu.Lock()
+	defer r.ridesMu.Unlock()
+
+	key := ""
+	if txID != "" {
+		key = txID + ":" + segmentID.String()
+		if r.appliedTx[key] {
+			// Já aplicado anteriormente com sucesso: idempotência garantida
+			return nil
+		}
+	}
+
+	ride, exists := r.rides[rideID]
+	if !exists || ride.Cancelled {
+		return errors.New("carona indisponível")
+	}
+
+	for i := range ride.Segments {
+		if ride.Segments[i].ID == segmentID {
+			if ride.Segments[i].AvailableSeats <= 0 {
+				return errors.New("não há assentos disponíveis no trecho")
+			}
+			ride.Segments[i].AvailableSeats--
+			if key != "" {
+				r.appliedTx[key] = true
+			}
+			if err := r.saveStateLocked(); err != nil {
+				ride.Segments[i].AvailableSeats++
+				if key != "" {
+					delete(r.appliedTx, key)
+				}
+				return fmt.Errorf("salvar estado após decrementar assento: %w", err)
+			}
+			return nil
+		}
+	}
+
+	return errors.New("trecho não encontrado")
+}
+
+// DecrementSeat decrementa em 1 os assentos disponíveis de um trecho específico e persiste o estado.
+func (r *Repository) DecrementSeat(rideID, segmentID uuid.UUID) error {
+	return r.DecrementSeatIdempotent(rideID, segmentID, "")
+}
+
+// IsTxApplied verifica se a transação especificada já teve o efeito de decremento aplicado no repositório.
+func (r *Repository) IsTxApplied(txID string, segmentID uuid.UUID) bool {
+	r.ridesMu.RLock()
+	defer r.ridesMu.RUnlock()
+
+	if txID == "" {
+		return false
+	}
+	key := txID + ":" + segmentID.String()
+	return r.appliedTx[key]
+}
+
+// IncrementSeat incrementa em 1 os assentos disponíveis de um trecho específico e persiste o estado.
+func (r *Repository) IncrementSeat(rideID, segmentID uuid.UUID) error {
+	r.ridesMu.Lock()
+	defer r.ridesMu.Unlock()
+
+	ride, exists := r.rides[rideID]
+	if !exists || ride.Cancelled {
+		return errors.New("carona indisponível")
+	}
+
+	for i := range ride.Segments {
+		if ride.Segments[i].ID == segmentID {
+			ride.Segments[i].AvailableSeats++
+			if err := r.saveStateLocked(); err != nil {
+				ride.Segments[i].AvailableSeats--
+				return fmt.Errorf("salvar estado após incrementar assento: %w", err)
+			}
+			return nil
+		}
+	}
+
+	return errors.New("trecho não encontrado")
+}

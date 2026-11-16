@@ -1,0 +1,215 @@
+package httpapi
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/consortium"
+	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/models"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+// RepositoryReader define a interface de acesso e modificação do repositório
+// necessária para os endpoints HTTP inter-servidor.
+type RepositoryReader interface {
+	GetActiveRidesByDate(date time.Time) ([]*models.Ride, error)
+	GetRideByID(id uuid.UUID) (*models.Ride, error)
+	GetRideBySegmentID(segmentID uuid.UUID) (*models.Ride, error)
+	DecrementSeat(rideID, segmentID uuid.UUID) error
+	IncrementSeat(rideID, segmentID uuid.UUID) error
+	DecrementSeatIdempotent(rideID, segmentID uuid.UUID, txID string) error
+	IsTxApplied(txID string, segmentID uuid.UUID) bool
+}
+
+// HTTPServer encapsula o servidor REST em Gin para comunicação inter-servidores.
+type HTTPServer struct {
+	companyID  string
+	addr       string
+	actualAddr string
+	listener   net.Listener
+	mu         sync.Mutex
+	repo       RepositoryReader
+	lockStore  *consortium.LockStore
+	wal        *consortium.WAL
+	clock      *consortium.LamportClock
+	engine     *gin.Engine
+	httpServer *http.Server
+	stopChan   chan struct{}
+}
+
+// NewHTTPServer cria e configura a instância do servidor HTTP com suas rotas internas.
+func NewHTTPServer(
+	companyID, addr string,
+	repo RepositoryReader,
+	lockStore *consortium.LockStore,
+	wal *consortium.WAL,
+	clock *consortium.LamportClock,
+) *HTTPServer {
+	gin.SetMode(gin.ReleaseMode)
+	engine := gin.New()
+	engine.Use(gin.Logger())
+	engine.Use(gin.Recovery())
+
+	s := &HTTPServer{
+		companyID: companyID,
+		addr:      addr,
+		repo:      repo,
+		lockStore: lockStore,
+		wal:       wal,
+		clock:     clock,
+		engine:    engine,
+		stopChan:  make(chan struct{}),
+	}
+
+	s.setupRoutes()
+	return s
+}
+
+func (s *HTTPServer) setupRoutes() {
+	v1 := s.engine.Group("/internal/v1")
+	{
+		v1.GET("/health", s.handleHealth)
+		v1.GET("/rides", s.handleGetRides)
+		v1.GET("/rides/:rideID", s.handleGetRide)
+
+		// Endpoints do protocolo 2PC (Two-Phase Commit)
+		v1.POST("/segments/:segmentID/prepare", s.handlePrepare)
+		v1.POST("/segments/:segmentID/commit", s.handleCommit)
+		v1.POST("/segments/:segmentID/abort", s.handleAbort)
+		v1.GET("/segments/:segmentID/status/:txID", s.handleStatus)
+		v1.POST("/segments/:segmentID/release", s.handleRelease)
+	}
+}
+
+// Addr retorna o endereço real em que o servidor HTTP está escutando.
+func (s *HTTPServer) Addr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.actualAddr != "" {
+		return s.actualAddr
+	}
+	return s.addr
+}
+
+// RecoverParticipant recupera o estado durável do participante após queda/reinicialização.
+// Se houver transações marcadas como COMMITTED no WAL cujo efeito ainda não tenha sido
+// aplicado no repositório, o decremento é reaplicado de maneira idempotente.
+func (s *HTTPServer) RecoverParticipant() {
+	if s.wal == nil || s.repo == nil {
+		return
+	}
+
+	entries, err := s.wal.ReadAll()
+	if err != nil {
+		log.Printf("[httpapi] erro ao ler WAL no recovery do participante: %v", err)
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.Role == "participant" && entry.Status == consortium.TxCommitted {
+			for _, segStr := range entry.SegmentIDs {
+				segID, err := uuid.Parse(segStr)
+				if err != nil {
+					continue
+				}
+
+				if !s.repo.IsTxApplied(entry.TxID, segID) {
+					ride, err := s.repo.GetRideBySegmentID(segID)
+					if err == nil {
+						log.Printf("[httpapi] recovery participante: aplicando efeito pendente tx_id=%s seg=%s", entry.TxID, segID)
+						_ = s.repo.DecrementSeatIdempotent(ride.ID, segID, entry.TxID)
+					} else {
+						log.Printf("[httpapi] recovery participante: carona não encontrada para seg=%s tx_id=%s: %v", segID, entry.TxID, err)
+					}
+				}
+			}
+		}
+	}
+}
+
+// Start inicia o servidor HTTP e a goroutine de expiração de locks por TTL.
+func (s *HTTPServer) Start() error {
+	// Recupera estado de transações commitadas locais antes de aceitar tráfego
+	s.RecoverParticipant()
+
+	listener, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.listener = listener
+	s.actualAddr = listener.Addr().String()
+	s.mu.Unlock()
+
+	s.httpServer = &http.Server{
+		Handler: s.engine,
+	}
+
+	go s.startLockReaper()
+
+	log.Printf("[httpapi] servidor REST inter-empresa iniciado empresa=%s addr=%s", s.companyID, s.actualAddr)
+	if err := s.httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+// Stop encerra o servidor HTTP.
+func (s *HTTPServer) Stop(ctx context.Context) error {
+	s.mu.Lock()
+	select {
+	case <-s.stopChan:
+		// já fechado
+	default:
+		close(s.stopChan)
+	}
+	s.mu.Unlock()
+
+	if s.httpServer != nil {
+		return s.httpServer.Shutdown(ctx)
+	}
+	s.mu.Lock()
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+// Engine expõe o engine do Gin para testes automatizados.
+func (s *HTTPServer) Engine() *gin.Engine {
+	return s.engine
+}
+
+// startLockReaper varre periodicamente locks expirados e os registra no WAL.
+// Locks com IsPrepared == true são ignorados pelo LockStore.ExpireAll().
+func (s *HTTPServer) startLockReaper() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopChan:
+			return
+		case <-ticker.C:
+			expired := s.lockStore.ExpireAll()
+			for _, lock := range expired {
+				log.Printf("[httpapi] lock expirado por TTL tx_id=%s segment_id=%s", lock.TxID, lock.SegmentID)
+				_ = s.wal.Append(consortium.WALEntry{
+					TxID:          lock.TxID,
+					Role:          "participant",
+					Status:        consortium.TxExpired,
+					CoordinatorID: s.companyID,
+					SegmentIDs:    []string{lock.SegmentID},
+					UpdatedAt:     time.Now(),
+				})
+			}
+		}
+	}
+}
