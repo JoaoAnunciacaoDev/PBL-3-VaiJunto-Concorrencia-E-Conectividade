@@ -368,6 +368,18 @@ func (s *Server) processRequest(request protocol.Request, session *Session) prot
 	case protocol.ActionCancelRide:
 		return s.handleCancelRide(request.Payload, session)
 
+	case protocol.ActionStartRide:
+		return s.handleStartRide(request.Payload, session)
+
+	case protocol.ActionFinishRide:
+		return s.handleFinishRide(request.Payload, session)
+
+	case protocol.ActionFinishSegment:
+		return s.handleFinishSegment(request.Payload, session)
+
+	case protocol.ActionReportNoShow:
+		return s.handleReportNoShow(request.Payload, session)
+
 	case protocol.ActionGetRidePassengers:
 		return s.handleGetRidePassengers(request.Payload, session)
 
@@ -382,6 +394,15 @@ func (s *Server) processRequest(request protocol.Request, session *Session) prot
 
 	case protocol.ActionCancelReservation:
 		return s.handleCancelReservation(request.Payload, session)
+
+	case protocol.ActionRateDriver:
+		return s.handleRateDriver(request.Payload, session)
+
+	case protocol.ActionRatePassenger:
+		return s.handleRatePassenger(request.Payload, session)
+
+	case protocol.ActionGetUserReputation:
+		return s.handleGetUserReputation(request.Payload, session)
 
 	default:
 		return protocol.Response{Success: "error", Message: "Ação desconhecida"}

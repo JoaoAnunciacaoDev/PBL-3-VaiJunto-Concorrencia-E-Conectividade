@@ -312,3 +312,107 @@ func (r *Repository) IncrementSeat(rideID, segmentID uuid.UUID) error {
 
 	return errors.New("trecho não encontrado")
 }
+
+// StartRide marca uma carona como em andamento (IN_PROGRESS) pelo motorista responsável.
+func (r *Repository) StartRide(rideID, driverID uuid.UUID) (*models.Ride, error) {
+	r.ridesMu.Lock()
+	defer r.ridesMu.Unlock()
+
+	ride, exists := r.rides[rideID]
+	if !exists {
+		return nil, errors.New("carona não encontrada")
+	}
+	if ride.DriverID != driverID {
+		return nil, errors.New("a carona não pertence ao motorista autenticado")
+	}
+
+	oldRide := cloneRide(ride)
+	if err := ride.Start(time.Now()); err != nil {
+		return nil, err
+	}
+
+	if err := r.saveStateLocked(); err != nil {
+		r.rides[rideID] = oldRide
+		return nil, fmt.Errorf("salvar estado ao iniciar carona: %w", err)
+	}
+
+	return cloneRide(ride), nil
+}
+
+// FinishSegment conclui um trecho específico de uma carona pelo motorista responsável.
+func (r *Repository) FinishSegment(rideID, segmentID, driverID uuid.UUID) (*models.Ride, error) {
+	r.ridesMu.Lock()
+	defer r.ridesMu.Unlock()
+
+	ride, exists := r.rides[rideID]
+	if !exists {
+		return nil, errors.New("carona não encontrada")
+	}
+	if ride.DriverID != driverID {
+		return nil, errors.New("a carona não pertence ao motorista autenticado")
+	}
+
+	oldRide := cloneRide(ride)
+	if err := ride.FinishSegment(segmentID, time.Now()); err != nil {
+		return nil, err
+	}
+
+	if err := r.saveStateLocked(); err != nil {
+		r.rides[rideID] = oldRide
+		return nil, fmt.Errorf("salvar estado ao finalizar trecho: %w", err)
+	}
+
+	return cloneRide(ride), nil
+}
+
+// FinishRide marca uma carona como concluída (COMPLETED) pelo motorista responsável.
+func (r *Repository) FinishRide(rideID, driverID uuid.UUID) (*models.Ride, error) {
+	r.ridesMu.Lock()
+	defer r.ridesMu.Unlock()
+
+	ride, exists := r.rides[rideID]
+	if !exists {
+		return nil, errors.New("carona não encontrada")
+	}
+	if ride.DriverID != driverID {
+		return nil, errors.New("a carona não pertence ao motorista autenticado")
+	}
+
+	oldRide := cloneRide(ride)
+	if err := ride.Finish(time.Now()); err != nil {
+		return nil, err
+	}
+
+	if err := r.saveStateLocked(); err != nil {
+		r.rides[rideID] = oldRide
+		return nil, fmt.Errorf("salvar estado ao finalizar carona: %w", err)
+	}
+
+	return cloneRide(ride), nil
+}
+
+// SetRideNoShow marca uma carona como finalizada com ausência de passageiro (COMPLETED_NO_SHOW).
+func (r *Repository) SetRideNoShow(rideID, driverID uuid.UUID) (*models.Ride, error) {
+	r.ridesMu.Lock()
+	defer r.ridesMu.Unlock()
+
+	ride, exists := r.rides[rideID]
+	if !exists {
+		return nil, errors.New("carona não encontrada")
+	}
+	if ride.DriverID != driverID {
+		return nil, errors.New("a carona não pertence ao motorista autenticado")
+	}
+
+	oldRide := cloneRide(ride)
+	if err := ride.ReportNoShow(time.Now()); err != nil {
+		return nil, err
+	}
+
+	if err := r.saveStateLocked(); err != nil {
+		r.rides[rideID] = oldRide
+		return nil, fmt.Errorf("salvar estado ao reportar no-show: %w", err)
+	}
+
+	return cloneRide(ride), nil
+}

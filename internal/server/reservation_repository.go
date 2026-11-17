@@ -157,6 +157,19 @@ func (r *Repository) GetReservationsByPassengerID(passengerID uuid.UUID) ([]*mod
 	return reservations, nil
 }
 
+// GetReservationByID busca uma reserva pelo seu identificador único.
+func (r *Repository) GetReservationByID(id uuid.UUID) (*models.Reservation, error) {
+	r.reservationsMu.RLock()
+	defer r.reservationsMu.RUnlock()
+
+	reservation, exists := r.reservations[id]
+	if !exists {
+		return nil, errors.New("reserva não encontrada")
+	}
+
+	return cloneReservation(reservation), nil
+}
+
 // GetConfirmedPassengerIDsByRideID returns each passenger only once per
 // segment. Canceled reservations are deliberately excluded.
 func (r *Repository) GetConfirmedPassengerIDsByRideID(rideID uuid.UUID) (map[uuid.UUID][]uuid.UUID, error) {

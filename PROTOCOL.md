@@ -393,6 +393,95 @@ Retorna passageiros confirmados por trecho de uma carona pertencente ao motorist
 
 Trechos sem reserva possuem `"passengers": []`. Reservas canceladas não aparecem.
 
+### `start_ride`
+
+Inicia uma carona agendada. Apenas caronas com status `SCHEDULED` podem ser iniciadas.
+
+**Requisição**
+
+```json
+{
+  "action": "start_ride",
+  "payload": {"ride_id": "<ride_uuid>"}
+}
+```
+
+**Sucesso:** `data` contém a [Carona](#carona-ride) com status atualizado para `IN_PROGRESS` e campo `started_at` preenchido.
+
+### `finish_segment`
+
+Conclui um trecho específico de uma carona. Se todos os trechos da carona forem concluídos, a carona como um todo passa para `COMPLETED`. Passageiros que reservaram este trecho já podem avaliá-lo imediatamente sem esperar a conclusão de trechos posteriores.
+
+**Requisição**
+
+```json
+{
+  "action": "finish_segment",
+  "payload": {
+    "ride_id": "<ride_uuid>",
+    "segment_id": "<segment_uuid>"
+  }
+}
+```
+
+**Sucesso:** `data` contém a [Carona](#carona-ride) com o trecho atualizado para status `COMPLETED`.
+
+### `finish_ride`
+
+Conclui uma carona em andamento. Apenas caronas com status `IN_PROGRESS` podem ser finalizadas.
+
+**Requisição**
+
+```json
+{
+  "action": "finish_ride",
+  "payload": {"ride_id": "<ride_uuid>"}
+}
+```
+
+**Sucesso:** `data` contém a [Carona](#carona-ride) com status atualizado para `COMPLETED` e campo `completed_at` preenchido.
+
+### `report_no_show`
+
+Reporta a ausência de um passageiro no local e horário de embarque. Atualiza o status da carona para `COMPLETED_NO_SHOW` e gera uma ocorrência permanente de No-show na reputação do passageiro.
+
+**Requisição**
+
+```json
+{
+  "action": "report_no_show",
+  "payload": {
+    "ride_id": "<ride_uuid>",
+    "reservation_id": "<reservation_uuid>",
+    "passenger_id": "<passenger_uuid>",
+    "comment": "Passageiro não compareceu ao embarque."
+  }
+}
+```
+
+**Sucesso:** não possui `data`.
+
+### `rate_passenger`
+
+Avalia a conduta de um passageiro que viajou com o motorista em uma carona concluída. A nota deve ser um número inteiro de 1 a 5. O sistema impede avaliações duplicadas.
+
+**Requisição**
+
+```json
+{
+  "action": "rate_passenger",
+  "payload": {
+    "ride_id": "<ride_uuid>",
+    "reservation_id": "<reservation_uuid>",
+    "passenger_id": "<passenger_uuid>",
+    "score": 5,
+    "comment": "Passageiro pontual e cordial."
+  }
+}
+```
+
+**Sucesso:** `data` contém os dados da avaliação registrada.
+
 ## Ações de passageiro
 
 Todas as ações desta seção requerem uma sessão autenticada. Usuários com perfil `"DRIVER"` também podem executar essas ações, pois motorista mantém as capacidades de passageiro.
@@ -486,6 +575,43 @@ Cancela uma reserva confirmada que pertença ao passageiro autenticado.
 ```
 
 **Sucesso:** não possui `data`. Os assentos dos trechos da reserva são devolvidos.
+
+### `rate_driver`
+
+Avalia o motorista de uma carona concluída (`COMPLETED`). O passageiro deve obrigatoriamente possuir reserva confirmada para a carona. A nota deve ser um número inteiro de 1 a 5. O sistema impede avaliações duplicadas.
+
+**Requisição**
+
+```json
+{
+  "action": "rate_driver",
+  "payload": {
+    "reservation_id": "<reservation_uuid>",
+    "driver_id": "<driver_uuid>",
+    "score": 5,
+    "comment": "Excelente direção, muito atencioso."
+  }
+}
+```
+
+**Sucesso:** `data` contém os dados da avaliação registrada.
+
+### `get_user_reputation`
+
+Consulta o histórico completo e métricas consolidadas de reputação (média de notas, total de avaliações, ocorrências de ausência/no-show) de qualquer usuário. Se `user_id` for omitido ou `null`, retorna a reputação do usuário autenticado na sessão.
+
+**Requisição**
+
+```json
+{
+  "action": "get_user_reputation",
+  "payload": {
+    "user_id": "<user_uuid>"
+  }
+}
+```
+
+**Sucesso:** `data` contém a estrutura de reputação do usuário.
 
 ## Erros e autorização
 

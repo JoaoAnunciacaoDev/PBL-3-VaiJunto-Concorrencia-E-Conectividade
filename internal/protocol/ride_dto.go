@@ -26,6 +26,26 @@ type CancelRideRequest struct {
 	RideID uuid.UUID `json:"ride_id"`
 }
 
+type StartRideRequest struct {
+	RideID uuid.UUID `json:"ride_id"`
+}
+
+type FinishRideRequest struct {
+	RideID uuid.UUID `json:"ride_id"`
+}
+
+type FinishSegmentRequest struct {
+	RideID    uuid.UUID `json:"ride_id"`
+	SegmentID uuid.UUID `json:"segment_id"`
+}
+
+type ReportNoShowRequest struct {
+	RideID        uuid.UUID `json:"ride_id"`
+	ReservationID uuid.UUID `json:"reservation_id"`
+	PassengerID   uuid.UUID `json:"passenger_id"`
+	Comment       string    `json:"comment"`
+}
+
 type GetRidePassengersRequest struct {
 	RideID uuid.UUID `json:"ride_id"`
 }

@@ -22,6 +22,8 @@ func passengerMenu(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) 
 		fmt.Fprintln(output, "1 - Buscar itinerários")
 		fmt.Fprintln(output, "2 - Minhas reservas")
 		fmt.Fprintln(output, "3 - Cancelar reserva")
+		fmt.Fprintln(output, "4 - Avaliar motorista")
+		fmt.Fprintln(output, "5 - Consultar reputação")
 		fmt.Fprintln(output, "0 - Voltar")
 
 		choice, err := readLine(input, output, "Opção: ")
@@ -53,6 +55,26 @@ func passengerMenu(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) 
 		case "3":
 			utils.ClearTerminal()
 			if !cancelReservation(tcpClient, input, output) {
+				return enum.MenuDisconnected
+			}
+			if !waitForEnter(input, output) {
+				return enum.MenuBack
+			}
+			utils.ClearTerminal()
+
+		case "4":
+			utils.ClearTerminal()
+			if !rateDriver(tcpClient, input, output) {
+				return enum.MenuDisconnected
+			}
+			if !waitForEnter(input, output) {
+				return enum.MenuBack
+			}
+			utils.ClearTerminal()
+
+		case "5":
+			utils.ClearTerminal()
+			if !viewReputation(tcpClient, input, output) {
 				return enum.MenuDisconnected
 			}
 			if !waitForEnter(input, output) {

@@ -21,6 +21,7 @@ type PersistentState struct {
 	Drivers             []storedDriver       `json:"drivers"`
 	Rides               []models.Ride        `json:"rides"`
 	Reservations        []models.Reservation `json:"reservations"`
+	Ratings             []models.Rating      `json:"ratings,omitempty"`
 	AppliedTransactions []string             `json:"applied_transactions,omitempty"`
 }
 
@@ -66,6 +67,14 @@ func (r *Repository) persistentStateLocked() PersistentState {
 	}
 	sort.Slice(state.Reservations, func(i, j int) bool {
 		return state.Reservations[i].CreatedAt.Before(state.Reservations[j].CreatedAt)
+	})
+
+	state.Ratings = make([]models.Rating, 0, len(r.ratings))
+	for _, rating := range r.ratings {
+		state.Ratings = append(state.Ratings, *cloneRating(rating))
+	}
+	sort.Slice(state.Ratings, func(i, j int) bool {
+		return state.Ratings[i].CreatedAt.Before(state.Ratings[j].CreatedAt)
 	})
 
 	state.AppliedTransactions = make([]string, 0, len(r.appliedTx))
@@ -138,6 +147,13 @@ func (r *Repository) loadPersistentState() error {
 			return errors.New("estado contém reservas duplicadas")
 		}
 		r.reservations[reservation.ID] = cloneReservation(&reservation)
+	}
+
+	for _, rating := range state.Ratings {
+		if rating.ID == uuid.Nil {
+			continue
+		}
+		r.ratings[rating.ID] = cloneRating(&rating)
 	}
 
 	for _, txKey := range state.AppliedTransactions {

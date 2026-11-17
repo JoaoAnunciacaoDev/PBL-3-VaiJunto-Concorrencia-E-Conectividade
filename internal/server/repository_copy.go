@@ -28,6 +28,22 @@ func cloneRide(ride *models.Ride) *models.Ride {
 	}
 	copy := *ride
 	copy.Segments = append([]models.Stage(nil), ride.Segments...)
+	if ride.StartedAt != nil {
+		st := *ride.StartedAt
+		copy.StartedAt = &st
+	}
+	if ride.CompletedAt != nil {
+		ct := *ride.CompletedAt
+		copy.CompletedAt = &ct
+	}
+	return &copy
+}
+
+func cloneRating(rating *models.Rating) *models.Rating {
+	if rating == nil {
+		return nil
+	}
+	copy := *rating
 	return &copy
 }
 

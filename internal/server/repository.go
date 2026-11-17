@@ -23,6 +23,9 @@ type Repository struct {
 	reservationsMu sync.RWMutex
 	reservations   map[uuid.UUID]*models.Reservation
 
+	ratingsMu sync.RWMutex
+	ratings   map[uuid.UUID]*models.Rating
+
 	appliedTxMu sync.RWMutex
 	appliedTx   map[string]bool // chave: txID + ":" + segmentID.String()
 
@@ -46,6 +49,7 @@ func NewRepository(usersPath string) (*Repository, error) {
 		drivers:          make(map[uuid.UUID]*models.Driver),
 		rides:            make(map[uuid.UUID]*models.Ride),
 		reservations:     make(map[uuid.UUID]*models.Reservation),
+		ratings:          make(map[uuid.UUID]*models.Rating),
 		appliedTx:        make(map[string]bool),
 		statePath:        filepath.Join(dataDirectory, "state.json"),
 		usersPath:        usersPath,
@@ -92,5 +96,5 @@ func (r *Repository) loadLegacyFiles() error {
 }
 
 func (r *Repository) hasDataLocked() bool {
-	return len(r.users) > 0 || len(r.drivers) > 0 || len(r.rides) > 0 || len(r.reservations) > 0
+	return len(r.users) > 0 || len(r.drivers) > 0 || len(r.rides) > 0 || len(r.reservations) > 0 || len(r.ratings) > 0
 }

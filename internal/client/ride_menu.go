@@ -24,6 +24,11 @@ func rideMenu(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) enum.
 		fmt.Fprintln(output, "2 - Minhas caronas")
 		fmt.Fprintln(output, "3 - Cancelar carona")
 		fmt.Fprintln(output, "4 - Passageiros por trecho")
+		fmt.Fprintln(output, "5 - Iniciar carona")
+		fmt.Fprintln(output, "6 - Concluir trecho de carona")
+		fmt.Fprintln(output, "7 - Concluir carona inteira")
+		fmt.Fprintln(output, "8 - Reportar ausência (No-Show)")
+		fmt.Fprintln(output, "9 - Avaliar passageiro")
 		fmt.Fprintln(output, "0 - Voltar")
 
 		choice, err := readLine(input, output, "Opção: ")
@@ -65,6 +70,56 @@ func rideMenu(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) enum.
 		case "4":
 			utils.ClearTerminal()
 			if !listRidePassengers(tcpClient, input, output) {
+				return enum.MenuDisconnected
+			}
+			if !waitForEnter(input, output) {
+				return enum.MenuBack
+			}
+			utils.ClearTerminal()
+
+		case "5":
+			utils.ClearTerminal()
+			if !startRide(tcpClient, input, output) {
+				return enum.MenuDisconnected
+			}
+			if !waitForEnter(input, output) {
+				return enum.MenuBack
+			}
+			utils.ClearTerminal()
+
+		case "6":
+			utils.ClearTerminal()
+			if !finishSegment(tcpClient, input, output) {
+				return enum.MenuDisconnected
+			}
+			if !waitForEnter(input, output) {
+				return enum.MenuBack
+			}
+			utils.ClearTerminal()
+
+		case "7":
+			utils.ClearTerminal()
+			if !finishRide(tcpClient, input, output) {
+				return enum.MenuDisconnected
+			}
+			if !waitForEnter(input, output) {
+				return enum.MenuBack
+			}
+			utils.ClearTerminal()
+
+		case "8":
+			utils.ClearTerminal()
+			if !reportNoShow(tcpClient, input, output) {
+				return enum.MenuDisconnected
+			}
+			if !waitForEnter(input, output) {
+				return enum.MenuBack
+			}
+			utils.ClearTerminal()
+
+		case "9":
+			utils.ClearTerminal()
+			if !ratePassenger(tcpClient, input, output) {
 				return enum.MenuDisconnected
 			}
 			if !waitForEnter(input, output) {
