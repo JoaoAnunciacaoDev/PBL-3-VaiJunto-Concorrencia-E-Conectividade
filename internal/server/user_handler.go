@@ -57,11 +57,13 @@ func (s *Server) handleRegisterUser(payload json.RawMessage) protocol.Response {
 	}
 
 	user := models.User{
-		ID:           uuid.New(),
-		Name:         name,
-		Email:        email,
-		PasswordHash: string(passwordHash),
-		Role:         dto.Role,
+		ID:            uuid.New(),
+		Name:          name,
+		Email:         email,
+		PasswordHash:  string(passwordHash),
+		Role:          dto.Role,
+		WalletAddress: strings.TrimSpace(dto.WalletAddress),
+		IdentityHash:  strings.TrimSpace(dto.IdentityHash),
 	}
 
 	if err := s.repository.SaveUser(&user); err != nil {
@@ -144,11 +146,13 @@ func (s *Server) handleLogout(session *Session) protocol.Response {
 
 func (s *Server) userResponse(user models.User, message string) protocol.Response {
 	data, err := json.Marshal(protocol.UserResponse{
-		ID:        user.ID,
-		Name:      user.Name,
-		Email:     user.Email,
-		Role:      user.Role,
-		CompanyID: s.companyID,
+		ID:            user.ID,
+		Name:          user.Name,
+		Email:         user.Email,
+		Role:          user.Role,
+		CompanyID:     s.companyID,
+		WalletAddress: user.WalletAddress,
+		IdentityHash:  user.IdentityHash,
 	})
 	if err != nil {
 		return protocol.Response{

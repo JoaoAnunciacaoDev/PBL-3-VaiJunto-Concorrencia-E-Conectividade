@@ -40,6 +40,16 @@ func (r *Ride) GetStatus() RideStatus {
 	return RideStatusScheduled
 }
 
+// CanBook indica se a carona ainda aceita novas reservas de assentos.
+func (r *Ride) CanBook() bool {
+	return !r.Cancelled && r.GetStatus() == RideStatusScheduled
+}
+
+// CanCancel indica se a carona ainda pode ser cancelada pelo motorista.
+func (r *Ride) CanCancel() bool {
+	return !r.Cancelled && r.GetStatus() == RideStatusScheduled
+}
+
 func (r *Ride) Start(now time.Time) error {
 	if r.Cancelled || r.GetStatus() != RideStatusScheduled {
 		return errors.New("apenas caronas agendadas e não canceladas podem ser iniciadas")

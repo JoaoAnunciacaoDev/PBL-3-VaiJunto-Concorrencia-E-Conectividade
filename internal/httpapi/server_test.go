@@ -108,6 +108,26 @@ func (m *mockRepo) IncrementSeat(rideID, segmentID uuid.UUID) error {
 	return errors.New("segment not found")
 }
 
+func (m *mockRepo) SaveSegmentBooking(_ *models.SegmentBooking) error {
+	return nil
+}
+
+func (m *mockRepo) CancelSegmentBooking(_, _, _ uuid.UUID) error {
+	return nil
+}
+
+func (m *mockRepo) SaveRating(_ *models.Rating) error {
+	return nil
+}
+
+func (m *mockRepo) GetReputationByUserID(userID uuid.UUID) (*models.UserReputation, error) {
+	return &models.UserReputation{UserID: userID}, nil
+}
+
+func (m *mockRepo) CancelReservationByRideCancellation(_ uuid.UUID, _ string) ([]models.ReservedSegment, error) {
+	return nil, nil
+}
+
 func setupTestServer(t *testing.T) (*HTTPServer, *mockRepo, *consortium.WAL, *consortium.LockStore) {
 	t.Helper()
 	repo := newMockRepo()

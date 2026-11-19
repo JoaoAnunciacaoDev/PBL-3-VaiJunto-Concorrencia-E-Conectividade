@@ -6,18 +6,22 @@ import (
 )
 
 type CreateUserRequest struct {
-	Name     string          `json:"name"`
-	Email    string          `json:"email"`
-	Password string          `json:"password"`
-	Role     models.UserRole `json:"role"`
+	Name          string          `json:"name"`
+	Email         string          `json:"email"`
+	Password      string          `json:"password"`
+	Role          models.UserRole `json:"role"`
+	WalletAddress string          `json:"wallet_address,omitempty"`
+	IdentityHash  string          `json:"identity_hash,omitempty"`
 }
 
 type UserResponse struct {
-	ID    uuid.UUID       `json:"uuid"`
-	Name  string          `json:"name"`
-	Email string          `json:"email"`
-	Role      models.UserRole `json:"role"`
-	CompanyID string          `json:"company_id,omitempty"`
+	ID            uuid.UUID       `json:"uuid"`
+	Name          string          `json:"name"`
+	Email         string          `json:"email"`
+	Role          models.UserRole `json:"role"`
+	CompanyID     string          `json:"company_id,omitempty"`
+	WalletAddress string          `json:"wallet_address,omitempty"`
+	IdentityHash  string          `json:"identity_hash,omitempty"`
 }
 
 type DriverResponse struct {

@@ -122,7 +122,7 @@ func NewServerWithConfig(cfg ServerConfig) (*Server, error) {
 		)
 	}
 
-	return &Server{
+	srv := &Server{
 		companyID:       cfg.CompanyID,
 		addr:            cfg.TCPAddr,
 		httpAddr:        cfg.HTTPAddr,
@@ -137,7 +137,13 @@ func NewServerWithConfig(cfg ServerConfig) (*Server, error) {
 		readIdleTimeout: defaultReadIdleTimeout,
 		writeTimeout:    defaultWriteTimeout,
 		maxRequestSize:  protocol.MaxRequestSize,
-	}, nil
+	}
+
+	if httpServer != nil {
+		httpServer.SetRideCancelledHandler(srv.handleIncomingRemoteRideCancelled)
+	}
+
+	return srv, nil
 }
 
 // Start inicia o servidor, escutando no endereço especificado e aceitando conexões de clientes.
@@ -400,6 +406,9 @@ func (s *Server) processRequest(request protocol.Request, session *Session) prot
 
 	case protocol.ActionRatePassenger:
 		return s.handleRatePassenger(request.Payload, session)
+
+	case protocol.ActionFileComplaint:
+		return s.handleFileComplaint(request.Payload, session)
 
 	case protocol.ActionGetUserReputation:
 		return s.handleGetUserReputation(request.Payload, session)

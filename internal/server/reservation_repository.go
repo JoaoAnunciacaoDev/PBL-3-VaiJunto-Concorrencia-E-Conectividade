@@ -37,6 +37,9 @@ func (r *Repository) ConfirmReservation(passengerID uuid.UUID, segments []models
 		return nil, errors.New("reserva inválida")
 	}
 
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
 	r.ridesMu.Lock()
 	defer r.ridesMu.Unlock()
 
@@ -89,9 +92,20 @@ func (r *Repository) ConfirmReservation(passengerID uuid.UUID, segments []models
 // RegisterConfirmedReservation grava a reserva com status Confirmada no histórico do passageiro
 // após a conclusão com sucesso do protocolo 2PC (sem decrementar assentos novamente).
 func (r *Repository) RegisterConfirmedReservation(passengerID uuid.UUID, segments []models.ReservedSegment) (*models.Reservation, error) {
+	return r.RegisterConfirmedReservationWithID(uuid.New(), passengerID, segments)
+}
+
+// RegisterConfirmedReservationWithID grava a reserva confirmada usando o ID informado.
+func (r *Repository) RegisterConfirmedReservationWithID(reservationID, passengerID uuid.UUID, segments []models.ReservedSegment) (*models.Reservation, error) {
 	if passengerID == uuid.Nil || len(segments) == 0 {
 		return nil, errors.New("reserva inválida")
 	}
+	if reservationID == uuid.Nil {
+		reservationID = uuid.New()
+	}
+
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
 
 	r.reservationsMu.Lock()
 	defer r.reservationsMu.Unlock()
@@ -104,7 +118,7 @@ func (r *Repository) RegisterConfirmedReservation(passengerID uuid.UUID, segment
 	}
 
 	reservation := &models.Reservation{
-		ID:          uuid.New(),
+		ID:          reservationID,
 		PassengerID: passengerID,
 		Status:      enum.Confirmada,
 		Segments:    append([]models.ReservedSegment(nil), segments...),
@@ -217,6 +231,9 @@ func (r *Repository) GetConfirmedPassengerIDsByRideID(rideID uuid.UUID) (map[uui
 }
 
 func (r *Repository) CancelReservation(reservationID, passengerID uuid.UUID, companyID string) ([]models.ReservedSegment, error) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
 	r.ridesMu.Lock()
 	defer r.ridesMu.Unlock()
 
@@ -263,6 +280,56 @@ func (r *Repository) CancelReservation(reservationID, passengerID uuid.UUID, com
 	return append([]models.ReservedSegment(nil), reservation.Segments...), nil
 }
 
+// CancelReservationByRideCancellation cancela de forma idempotente uma reserva
+// cujo motorista de um dos trechos cancelou a carona, restaurando os assentos dos
+// trechos locais ativos vinculados à mesma reserva.
+func (r *Repository) CancelReservationByRideCancellation(reservationID uuid.UUID, companyID string) ([]models.ReservedSegment, error) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
+	r.ridesMu.Lock()
+	defer r.ridesMu.Unlock()
+
+	r.reservationsMu.Lock()
+	defer r.reservationsMu.Unlock()
+
+	reservation, exists := r.reservations[reservationID]
+	if !exists {
+		return nil, nil
+	}
+	if reservation.Status != enum.Confirmada {
+		return nil, nil
+	}
+
+	var localStages []reservedStage
+	for _, segment := range reservation.Segments {
+		if companyID == "" || segment.CompanyID == "" || segment.CompanyID == companyID {
+			ride, exists := r.rides[segment.RideID]
+			if exists && !ride.Cancelled {
+				for index := range ride.Segments {
+					if ride.Segments[index].ID == segment.SegmentID {
+						localStages = append(localStages, reservedStage{stage: &ride.Segments[index]})
+						break
+					}
+				}
+			}
+		}
+	}
+
+	for _, stage := range localStages {
+		stage.stage.AvailableSeats++
+	}
+
+	reservation.Status = enum.Cancelada
+	if err := r.saveStateLocked(); err != nil {
+		r.restoreSeats(localStages)
+		reservation.Status = enum.Confirmada
+		return nil, fmt.Errorf("salvar cancelamento por carona cancelada: %w", err)
+	}
+
+	return append([]models.ReservedSegment(nil), reservation.Segments...), nil
+}
+
 type reservedStage struct {
 	stage *models.Stage
 }
@@ -273,22 +340,66 @@ type affectedReservation struct {
 }
 
 // confirmedReservationsForRideLocked gathers every valid confirmed reservation
-// that uses the ride. It validates all data before changing any seat or status.
-func (r *Repository) confirmedReservationsForRideLocked(rideID uuid.UUID) ([]affectedReservation, error) {
+// that uses the ride. It validates all local data before changing any seat or status,
+// and collects remote segments that must be released when a multi-company reservation
+// includes segments operated by other consortium companies.
+func (r *Repository) confirmedReservationsForRideLocked(rideID uuid.UUID, companyID string) ([]affectedReservation, []RemoteSegmentRelease, error) {
 	affected := make([]affectedReservation, 0)
+	remoteReleases := make([]RemoteSegmentRelease, 0)
+
 	for _, reservation := range r.reservations {
 		if reservation.Status != enum.Confirmada || !reservationContainsRide(reservation, rideID) {
 			continue
 		}
 
-		stages, err := r.reservedStagesLocked(reservation.Segments)
-		if err != nil {
-			return nil, fmt.Errorf("reserva %s inválida: %w", reservation.ID, err)
+		stages := make([]reservedStage, 0, len(reservation.Segments))
+		seen := make(map[models.ReservedSegment]struct{}, len(reservation.Segments))
+		for _, segment := range reservation.Segments {
+			if !segment.IsValid() {
+				return nil, nil, fmt.Errorf("reserva %s inválida: trecho reservado inválido", reservation.ID)
+			}
+			if _, exists := seen[segment]; exists {
+				return nil, nil, fmt.Errorf("reserva %s inválida: trecho reservado repetido", reservation.ID)
+			}
+			seen[segment] = struct{}{}
+
+			isRemote := (companyID != "" && segment.CompanyID != "" && segment.CompanyID != companyID) ||
+				(companyID == "" && segment.CompanyID != "" && r.rides[segment.RideID] == nil)
+			if isRemote {
+				remoteReleases = append(remoteReleases, RemoteSegmentRelease{
+					CompanyID:     segment.CompanyID,
+					RideID:        segment.RideID,
+					SegmentID:     segment.SegmentID,
+					ReservationID: reservation.ID,
+					PassengerID:   reservation.PassengerID,
+				})
+				continue
+			}
+
+			localRide, exists := r.rides[segment.RideID]
+			if !exists {
+				return nil, nil, fmt.Errorf("reserva %s inválida: carona indisponível", reservation.ID)
+			}
+
+			found := false
+			for index := range localRide.Segments {
+				if localRide.Segments[index].ID == segment.SegmentID {
+					if !localRide.Cancelled {
+						stages = append(stages, reservedStage{stage: &localRide.Segments[index]})
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, nil, fmt.Errorf("reserva %s inválida: trecho não encontrado", reservation.ID)
+			}
 		}
+
 		affected = append(affected, affectedReservation{reservation: reservation, stages: stages})
 	}
 
-	return affected, nil
+	return affected, remoteReleases, nil
 }
 
 func reservationContainsRide(reservation *models.Reservation, rideID uuid.UUID) bool {
@@ -323,13 +434,16 @@ func (r *Repository) reservedStagesLocked(segments []models.ReservedSegment) ([]
 		seen[segment] = struct{}{}
 
 		ride, exists := r.rides[segment.RideID]
-		if !exists || ride.Cancelled {
+		if !exists || !ride.CanBook() {
 			return nil, errors.New("carona indisponível")
 		}
 
 		found := false
 		for index := range ride.Segments {
 			if ride.Segments[index].ID == segment.SegmentID {
+				if ride.Segments[index].GetStatus() == models.StageStatusCompleted {
+					return nil, errors.New("trecho já concluído")
+				}
 				stages = append(stages, reservedStage{stage: &ride.Segments[index]})
 				found = true
 				break

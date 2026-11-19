@@ -23,11 +23,21 @@ type Repository struct {
 	reservationsMu sync.RWMutex
 	reservations   map[uuid.UUID]*models.Reservation
 
+	bookingsMu sync.RWMutex
+	bookings   map[uuid.UUID]*models.SegmentBooking
+
 	ratingsMu sync.RWMutex
 	ratings   map[uuid.UUID]*models.Rating
 
 	appliedTxMu sync.RWMutex
 	appliedTx   map[string]bool // chave: txID + ":" + segmentID.String()
+
+	// writeMu serializa todas as operações de escrita que persistem o estado
+	// completo em disco via saveStateLocked(), evitando corridas de iteração
+	// concorrente em mapas enquanto leitores seguem paralelos com RLock.
+	// Ordem estrita de aquisição: writeMu -> driversMu -> ridesMu ->
+	// reservationsMu -> bookingsMu -> ratingsMu -> usersMu.
+	writeMu sync.Mutex
 
 	statePath        string
 	usersPath        string
@@ -49,6 +59,7 @@ func NewRepository(usersPath string) (*Repository, error) {
 		drivers:          make(map[uuid.UUID]*models.Driver),
 		rides:            make(map[uuid.UUID]*models.Ride),
 		reservations:     make(map[uuid.UUID]*models.Reservation),
+		bookings:         make(map[uuid.UUID]*models.SegmentBooking),
 		ratings:          make(map[uuid.UUID]*models.Rating),
 		appliedTx:        make(map[string]bool),
 		statePath:        filepath.Join(dataDirectory, "state.json"),
@@ -96,5 +107,5 @@ func (r *Repository) loadLegacyFiles() error {
 }
 
 func (r *Repository) hasDataLocked() bool {
-	return len(r.users) > 0 || len(r.drivers) > 0 || len(r.rides) > 0 || len(r.reservations) > 0 || len(r.ratings) > 0
+	return len(r.users) > 0 || len(r.drivers) > 0 || len(r.rides) > 0 || len(r.reservations) > 0 || len(r.bookings) > 0 || len(r.ratings) > 0
 }

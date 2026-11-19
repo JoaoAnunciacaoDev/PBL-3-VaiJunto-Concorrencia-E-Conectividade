@@ -80,16 +80,19 @@ type ItineraryResponse struct {
 }
 
 type ItinerarySegmentResponse struct {
-	RideID         uuid.UUID `json:"ride_id"`
-	SegmentID      uuid.UUID `json:"segment_id"`
-	CompanyID      string    `json:"company_id"`
-	DriverName     string    `json:"driver_name,omitempty"`
-	Origin         enum.City `json:"origin"`
-	Destination    enum.City `json:"destination"`
-	DepartureAt    time.Time `json:"departure_at"`
-	ArrivalAt      time.Time `json:"arrival_at"`
-	PriceCents     int       `json:"price_cents"`
-	AvailableSeats int       `json:"available_seats"`
+	RideID            uuid.UUID `json:"ride_id"`
+	SegmentID         uuid.UUID `json:"segment_id"`
+	CompanyID         string    `json:"company_id"`
+	DriverID          uuid.UUID `json:"driver_id,omitempty"`
+	DriverName        string    `json:"driver_name,omitempty"`
+	DriverRating      float64   `json:"driver_rating,omitempty"`
+	DriverRatingCount int       `json:"driver_rating_count,omitempty"`
+	Origin            enum.City `json:"origin"`
+	Destination       enum.City `json:"destination"`
+	DepartureAt       time.Time `json:"departure_at"`
+	ArrivalAt         time.Time `json:"arrival_at"`
+	PriceCents        int       `json:"price_cents"`
+	AvailableSeats    int       `json:"available_seats"`
 }
 
 type ConfirmReservationRequest struct {

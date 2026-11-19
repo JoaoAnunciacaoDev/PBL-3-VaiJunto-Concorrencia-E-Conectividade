@@ -1,8 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
+	"time"
 
 	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/models"
 	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/protocol"
@@ -91,11 +95,82 @@ func (s *Server) handleCancelRide(payload json.RawMessage, session *Session) pro
 		return protocol.Response{Success: "error", Message: "Identificador da carona inválido."}
 	}
 
-	if err := s.repository.CancelRide(dto.RideID, driver.ID); err != nil {
+	cancelRes, err := s.repository.CancelRideDetailed(dto.RideID, driver.ID, s.companyID)
+	if err != nil {
 		return protocol.Response{Success: "error", Message: err.Error()}
 	}
 
+	if cancelRes.HadPassengers {
+		cancelRecord := &models.Rating{
+			ID:         uuid.New(),
+			RideID:     dto.RideID,
+			AuthorID:   driver.ID,
+			AuthorName: driver.Name,
+			TargetID:   driver.ID,
+			TargetName: driver.Name,
+			Type:       models.RatingTypeDriverCancellation,
+			Score:      0,
+			Comment:    "Motorista cancelou carona que já possuía passageiros confirmados.",
+			CreatedAt:  time.Now(),
+		}
+		if err := s.repository.SaveRating(cancelRecord); err != nil {
+			log.Printf("[cancel_ride] falha ao registrar cancelamento do motorista: %v", err)
+		} else {
+			s.replicateRatingToPeers(cancelRecord)
+		}
+	}
+
+	for _, rel := range cancelRes.RemoteSegmentsToRelease {
+		s.releaseRemoteSegmentWithRetry(rel.CompanyID, rel.RideID, rel.SegmentID, rel.ReservationID, rel.PassengerID)
+	}
+
+	notifiedReservations := make(map[uuid.UUID]bool)
+	for _, booking := range cancelRes.RemoteBookings {
+		if booking.ReservationID == uuid.Nil || booking.CompanyID == "" || booking.CompanyID == s.companyID {
+			continue
+		}
+		if notifiedReservations[booking.ReservationID] {
+			continue
+		}
+		notifiedReservations[booking.ReservationID] = true
+		s.notifyRemoteRideCancelledWithRetry(booking.CompanyID, booking.ReservationID, dto.RideID)
+	}
+
 	return protocol.Response{Success: "success", Message: "Carona cancelada com sucesso."}
+}
+
+func (s *Server) notifyRemoteRideCancelledWithRetry(companyID string, reservationID, rideID uuid.UUID) {
+	if s.peers == nil {
+		return
+	}
+	peer, exists := s.peers.Get(companyID)
+	if !exists {
+		return
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"cancelled_company_id": s.companyID,
+		"ride_id":              rideID,
+	})
+	url := fmt.Sprintf("%s/internal/v1/reservations/%s/ride-cancelled", peer.InternalURL, reservationID)
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := s.httpClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		if attempt < 3 {
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
 }
 
 func (s *Server) handleStartRide(payload json.RawMessage, session *Session) protocol.Response {
@@ -178,16 +253,32 @@ func (s *Server) handleReportNoShow(payload json.RawMessage, session *Session) p
 	if ride.DriverID != driver.ID {
 		return protocol.Response{Success: "error", Message: "A carona não pertence ao motorista autenticado."}
 	}
-
-	_, _ = s.repository.SetRideNoShow(dto.RideID, driver.ID)
-
-	targetUser, _ := s.repository.GetUserByID(dto.PassengerID)
-	targetName := ""
-	if targetUser != nil {
-		targetName = targetUser.Name
+	rideStatus := ride.GetStatus()
+	if ride.Cancelled || (rideStatus != models.RideStatusScheduled && rideStatus != models.RideStatusInProgress) {
+		return protocol.Response{Success: "error", Message: "Só é possível reportar ausência em caronas agendadas ou em andamento."}
 	}
 
+	resID, _, _, found := s.repository.HasConfirmedBookingForRide(dto.RideID, dto.PassengerID)
+	if !found {
+		return protocol.Response{Success: "error", Message: "Passageiro não possui reserva confirmada nesta carona."}
+	}
+	if dto.ReservationID == uuid.Nil {
+		dto.ReservationID = resID
+	}
+
+	if s.repository.HasRatingOfType(driver.ID, dto.RideID, dto.PassengerID, models.RatingTypeNoShow) ||
+		s.repository.HasNoShowForRide(dto.RideID, dto.PassengerID) {
+		return protocol.Response{Success: "error", Message: "Ausência (No-show) já foi registrada para este passageiro nesta carona."}
+	}
+
+	if _, err := s.repository.MarkBookingNoShow(dto.RideID, dto.PassengerID); err != nil {
+		return protocol.Response{Success: "error", Message: err.Error()}
+	}
+
+	targetName := s.resolvePassengerNameForRide(dto.RideID, dto.PassengerID)
+
 	noShowRecord := &models.Rating{
+		ID:            uuid.New(),
 		RideID:        dto.RideID,
 		ReservationID: dto.ReservationID,
 		AuthorID:      driver.ID,
@@ -197,6 +288,7 @@ func (s *Server) handleReportNoShow(payload json.RawMessage, session *Session) p
 		Type:          models.RatingTypeNoShow,
 		Score:         0,
 		Comment:       dto.Comment,
+		CreatedAt:     time.Now(),
 	}
 	if noShowRecord.Comment == "" {
 		noShowRecord.Comment = "Passageiro não compareceu ao local de embarque (No-show)."
@@ -206,7 +298,25 @@ func (s *Server) handleReportNoShow(payload json.RawMessage, session *Session) p
 		return protocol.Response{Success: "error", Message: "Erro ao registrar ocorrência: " + err.Error()}
 	}
 
+	s.replicateRatingToPeers(noShowRecord)
+
 	return protocol.Response{Success: "success", Message: "Ausência de passageiro (No-show) registrada com sucesso."}
+}
+
+func (s *Server) resolvePassengerNameForRide(rideID, passengerID uuid.UUID) string {
+	if u, err := s.repository.GetUserByID(passengerID); err == nil && u.Name != "" {
+		return u.Name
+	}
+	if passengersBySeg, err := s.repository.GetConfirmedPassengersForRide(rideID); err == nil {
+		for _, bookings := range passengersBySeg {
+			for _, b := range bookings {
+				if b.PassengerID == passengerID && b.PassengerName != "" {
+					return b.PassengerName
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func rideResponse(data any, message string) protocol.Response {

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/enum"
+	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/models"
 	"github.com/google/uuid"
 )
 
@@ -17,13 +18,15 @@ type ReservationResponse struct {
 }
 
 type ReservationStageResponse struct {
-	RideID      uuid.UUID `json:"ride_id"`
-	SegmentID   uuid.UUID `json:"segment_id"`
-	CompanyID   string    `json:"company_id,omitempty"`
-	DriverName  string    `json:"driver_name,omitempty"`
-	Origin      enum.City `json:"origin"`
-	Destination enum.City `json:"destination"`
-	DepartureAt time.Time `json:"departure_at"`
-	ArrivalAt   time.Time `json:"arrival_at"`
-	PriceCents  int       `json:"price_cents"`
+	RideID      uuid.UUID          `json:"ride_id"`
+	SegmentID   uuid.UUID          `json:"segment_id"`
+	CompanyID   string             `json:"company_id,omitempty"`
+	DriverID    uuid.UUID          `json:"driver_id,omitempty"`
+	DriverName  string             `json:"driver_name,omitempty"`
+	Status      models.StageStatus `json:"status,omitempty"`
+	Origin      enum.City          `json:"origin"`
+	Destination enum.City          `json:"destination"`
+	DepartureAt time.Time          `json:"departure_at"`
+	ArrivalAt   time.Time          `json:"arrival_at"`
+	PriceCents  int                `json:"price_cents"`
 }

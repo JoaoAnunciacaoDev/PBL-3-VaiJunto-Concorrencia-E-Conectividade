@@ -26,7 +26,8 @@ const (
 	ActionConfirmReservation  Action = "confirm_reservation"
 	ActionListMyReservations  Action = "list_my_reservations"
 	ActionCancelReservation   Action = "cancel_reservation"
-	ActionRateDriver          Action = "rate_driver"
-	ActionRatePassenger       Action = "rate_passenger"
-	ActionGetUserReputation   Action = "get_user_reputation"
+	ActionRateDriver        Action = "rate_driver"
+	ActionRatePassenger     Action = "rate_passenger"
+	ActionFileComplaint     Action = "file_complaint"
+	ActionGetUserReputation Action = "get_user_reputation"
 )

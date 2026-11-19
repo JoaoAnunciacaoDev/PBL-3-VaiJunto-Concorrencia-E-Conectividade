@@ -32,13 +32,17 @@ type WALSegment struct {
 
 // WALEntry representa uma entrada gravada no log de transações.
 type WALEntry struct {
-	TxID          string       `json:"tx_id"`
-	Role          string       `json:"role"` // coordinator ou participant
-	Status        TxStatus     `json:"status"`
-	CoordinatorID string       `json:"coordinator_id"`
-	SegmentIDs    []string     `json:"segment_ids,omitempty"`
-	Segments      []WALSegment `json:"segments,omitempty"`
-	UpdatedAt     time.Time    `json:"updated_at"`
+	TxID           string       `json:"tx_id"`
+	Role           string       `json:"role"` // coordinator ou participant
+	Status         TxStatus     `json:"status"`
+	CoordinatorID  string       `json:"coordinator_id"`
+	SegmentIDs     []string     `json:"segment_ids,omitempty"`
+	Segments       []WALSegment `json:"segments,omitempty"`
+	ReservationID  uuid.UUID    `json:"reservation_id,omitempty"`
+	PassengerID    uuid.UUID    `json:"passenger_id,omitempty"`
+	PassengerName  string       `json:"passenger_name,omitempty"`
+	PassengerEmail string       `json:"passenger_email,omitempty"`
+	UpdatedAt      time.Time    `json:"updated_at"`
 }
 
 // WAL implementa um Write-Ahead Log seguro e persistente.

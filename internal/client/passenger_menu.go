@@ -24,6 +24,7 @@ func passengerMenu(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) 
 		fmt.Fprintln(output, "3 - Cancelar reserva")
 		fmt.Fprintln(output, "4 - Avaliar motorista")
 		fmt.Fprintln(output, "5 - Consultar reputação")
+		fmt.Fprintln(output, "6 - Registrar denúncia")
 		fmt.Fprintln(output, "0 - Voltar")
 
 		choice, err := readLine(input, output, "Opção: ")
@@ -75,6 +76,16 @@ func passengerMenu(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) 
 		case "5":
 			utils.ClearTerminal()
 			if !viewReputation(tcpClient, input, output) {
+				return enum.MenuDisconnected
+			}
+			if !waitForEnter(input, output) {
+				return enum.MenuBack
+			}
+			utils.ClearTerminal()
+
+		case "6":
+			utils.ClearTerminal()
+			if !filePassengerComplaint(tcpClient, input, output) {
 				return enum.MenuDisconnected
 			}
 			if !waitForEnter(input, output) {
@@ -320,6 +331,11 @@ func printItinerary(output io.Writer, index int, itinerary protocol.ItineraryRes
 		}
 		if segment.DriverName != "" {
 			extra += fmt.Sprintf(" | Motorista: %s", segment.DriverName)
+		}
+		if segment.DriverRatingCount > 0 {
+			extra += fmt.Sprintf(" | Nota: %.1f★ (%d)", segment.DriverRating, segment.DriverRatingCount)
+		} else {
+			extra += " | Sem avaliações"
 		}
 		fmt.Fprintf(output, "%s → %s | %s até %s | %s%s\n", segment.Origin, segment.Destination, segment.DepartureAt.Format(rideDateTimeLayout), segment.ArrivalAt.Format(rideDateTimeLayout), formatCents(segment.PriceCents), extra)
 	}

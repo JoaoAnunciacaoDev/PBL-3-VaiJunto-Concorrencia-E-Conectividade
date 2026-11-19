@@ -49,6 +49,9 @@ func (r *Repository) SaveDriver(driver *models.Driver) error {
 		return errors.New("motorista inválido")
 	}
 
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
 	r.driversMu.Lock()
 	defer r.driversMu.Unlock()
 
@@ -83,6 +86,9 @@ func (r *Repository) GetDriverByUserID(userID uuid.UUID) (*models.Driver, error)
 // validation and the persistence, so a new ride cannot be published between
 // those two steps.
 func (r *Repository) UpdateDriverVehicle(driverID uuid.UUID, vehicle models.Vehicle) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
 	r.driversMu.Lock()
 	defer r.driversMu.Unlock()
 
@@ -115,6 +121,9 @@ func (r *Repository) UpdateDriverVehicle(driverID uuid.UUID, vehicle models.Vehi
 // RemoveDriverVehicle refuses to remove the vehicle while an active ride still
 // belongs to the driver.
 func (r *Repository) RemoveDriverVehicle(driverID uuid.UUID) error {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
 	r.driversMu.Lock()
 	defer r.driversMu.Unlock()
 

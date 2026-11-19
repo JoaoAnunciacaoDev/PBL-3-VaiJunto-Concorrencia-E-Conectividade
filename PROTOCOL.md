@@ -145,6 +145,10 @@ Valores monetários são sempre inteiros em centavos: `2500` representa R$ 25,00
     {
       "ride_id": "<ride_uuid>",
       "segment_id": "<segment_uuid>",
+      "company_id": "empresa-a",
+      "driver_id": "<driver_uuid>",
+      "driver_name": "Ana Souza",
+      "status": "SCHEDULED",
       "origin": 2,
       "destination": 1,
       "departure_at": "2026-09-17T07:00:00-03:00",
@@ -512,6 +516,11 @@ Busca caminhos ativos que ligam origem e destino na data indicada.
       {
         "ride_id": "<ride_uuid>",
         "segment_id": "<segment_uuid>",
+        "company_id": "empresa-a",
+        "driver_id": "<driver_uuid>",
+        "driver_name": "Ana Souza",
+        "driver_rating": 4.8,
+        "driver_rating_count": 5,
         "origin": 3,
         "destination": 1,
         "departure_at": "2026-09-17T08:00:00Z",
@@ -578,7 +587,7 @@ Cancela uma reserva confirmada que pertença ao passageiro autenticado.
 
 ### `rate_driver`
 
-Avalia o motorista de uma carona concluída (`COMPLETED`). O passageiro deve obrigatoriamente possuir reserva confirmada para a carona. A nota deve ser um número inteiro de 1 a 5. O sistema impede avaliações duplicadas.
+Avalia o motorista de um trecho concluído ou carona concluída (`COMPLETED`), mesmo em viagens operadas por outras empresas do consórcio. O passageiro deve obrigatoriamente possuir reserva confirmada e não ter sofrido registro de ausência (`NO_SHOW`). A nota deve ser um número inteiro de 1 a 5. O sistema impede avaliações duplicadas.
 
 **Requisição**
 
@@ -587,6 +596,8 @@ Avalia o motorista de uma carona concluída (`COMPLETED`). O passageiro deve obr
   "action": "rate_driver",
   "payload": {
     "reservation_id": "<reservation_uuid>",
+    "ride_id": "<ride_uuid>",
+    "segment_id": "<segment_uuid>",
     "driver_id": "<driver_uuid>",
     "score": 5,
     "comment": "Excelente direção, muito atencioso."
@@ -594,11 +605,33 @@ Avalia o motorista de uma carona concluída (`COMPLETED`). O passageiro deve obr
 }
 ```
 
+*(Nota: em reservas com múltiplos trechos/caronas, informe `segment_id`, `ride_id` ou `driver_id` para selecionar o trecho avaliado).*
+
 **Sucesso:** `data` contém os dados da avaliação registrada.
+
+### `file_complaint`
+
+Registra uma denúncia formal contra outro participante com quem o usuário autenticado compartilhou viagem confirmada (passageiro denunciando motorista de sua reserva ou motorista denunciando passageiro confirmado em sua carona).
+
+**Requisição**
+
+```json
+{
+  "action": "file_complaint",
+  "payload": {
+    "reservation_id": "<reservation_uuid>",
+    "ride_id": "<ride_uuid>",
+    "target_id": "<user_uuid>",
+    "comment": "Motorista atrasou mais de 1 hora sem avisar."
+  }
+}
+```
+
+**Sucesso:** `data` contém o registro da denúncia.
 
 ### `get_user_reputation`
 
-Consulta o histórico completo e métricas consolidadas de reputação (média de notas, total de avaliações, ocorrências de ausência/no-show) de qualquer usuário. Se `user_id` for omitido ou `null`, retorna a reputação do usuário autenticado na sessão.
+Consulta o histórico completo e métricas consolidadas de reputação (média de notas, total de avaliações, ocorrências de ausência/no-show, cancelamentos tardios, denúncias e cancelamentos de carona) agregadas entre todas as empresas do consórcio. Se `user_id` for omitido ou `null`, retorna a reputação do usuário autenticado na sessão.
 
 **Requisição**
 

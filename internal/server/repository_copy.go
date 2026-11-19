@@ -27,7 +27,14 @@ func cloneRide(ride *models.Ride) *models.Ride {
 		return nil
 	}
 	copy := *ride
-	copy.Segments = append([]models.Stage(nil), ride.Segments...)
+	copy.Segments = make([]models.Stage, len(ride.Segments))
+	for i, seg := range ride.Segments {
+		if seg.CompletedAt != nil {
+			ct := *seg.CompletedAt
+			seg.CompletedAt = &ct
+		}
+		copy.Segments[i] = seg
+	}
 	if ride.StartedAt != nil {
 		st := *ride.StartedAt
 		copy.StartedAt = &st
@@ -36,6 +43,14 @@ func cloneRide(ride *models.Ride) *models.Ride {
 		ct := *ride.CompletedAt
 		copy.CompletedAt = &ct
 	}
+	return &copy
+}
+
+func cloneSegmentBooking(booking *models.SegmentBooking) *models.SegmentBooking {
+	if booking == nil {
+		return nil
+	}
+	copy := *booking
 	return &copy
 }
 

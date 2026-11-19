@@ -68,9 +68,24 @@ type prepareResult struct {
 	reason  string
 }
 
+// PassengerBookingInfo carrega a identificação da reserva e do passageiro que origina o 2PC,
+// permitindo que empresas participantes registrem quem reservou seus trechos.
+type PassengerBookingInfo struct {
+	ReservationID  uuid.UUID
+	PassengerID    uuid.UUID
+	PassengerName  string
+	PassengerEmail string
+}
+
 // ConfirmItinerary executa o Two-Phase Commit atômico para reservar todos os trechos do itinerário.
 // Ou todos os assentos são garantidos e confirmados, ou nenhum assento é reservado.
 func (c *Coordinator) ConfirmItinerary(passengerID uuid.UUID, segments []models.ReservedSegment) error {
+	return c.ConfirmItineraryWithPassenger(PassengerBookingInfo{PassengerID: passengerID}, segments)
+}
+
+// ConfirmItineraryWithPassenger executa o Two-Phase Commit propagando os dados do passageiro
+// e da reserva para que os nós participantes registrem o vínculo do passageiro no trecho.
+func (c *Coordinator) ConfirmItineraryWithPassenger(info PassengerBookingInfo, segments []models.ReservedSegment) error {
 	if len(segments) == 0 {
 		return errors.New("itinerário sem trechos")
 	}
@@ -93,13 +108,17 @@ func (c *Coordinator) ConfirmItinerary(passengerID uuid.UUID, segments []models.
 
 	// Anota o início da transação no WAL com metadados completos dos trechos
 	if err := c.wal.Append(WALEntry{
-		TxID:          txID,
-		Role:          "coordinator",
-		Status:        TxPrepared,
-		CoordinatorID: c.companyID,
-		SegmentIDs:    segmentIDStrings,
-		Segments:      walSegments,
-		UpdatedAt:     time.Now(),
+		TxID:           txID,
+		Role:           "coordinator",
+		Status:         TxPrepared,
+		CoordinatorID:  c.companyID,
+		SegmentIDs:     segmentIDStrings,
+		Segments:       walSegments,
+		ReservationID:  info.ReservationID,
+		PassengerID:    info.PassengerID,
+		PassengerName:  info.PassengerName,
+		PassengerEmail: info.PassengerEmail,
+		UpdatedAt:      time.Now(),
 	}); err != nil {
 		return fmt.Errorf("falha ao persistir início da transação no WAL: %w", err)
 	}
@@ -114,7 +133,7 @@ func (c *Coordinator) ConfirmItinerary(passengerID uuid.UUID, segments []models.
 			txID, segment.CompanyID, segment.SegmentID,
 		)
 
-		res := c.prepareSegment(txID, lamport, passengerID, segment)
+		res := c.prepareSegment(txID, lamport, info, segment)
 
 		if !res.ok {
 			log.Printf(
@@ -143,13 +162,17 @@ func (c *Coordinator) ConfirmItinerary(passengerID uuid.UUID, segments []models.
 		c.abortPreparedSegments(txID, preparedSegments)
 
 		if err := c.wal.Append(WALEntry{
-			TxID:          txID,
-			Role:          "coordinator",
-			Status:        TxAborted,
-			CoordinatorID: c.companyID,
-			SegmentIDs:    segmentIDStrings,
-			Segments:      walSegments,
-			UpdatedAt:     time.Now(),
+			TxID:           txID,
+			Role:           "coordinator",
+			Status:         TxAborted,
+			CoordinatorID:  c.companyID,
+			SegmentIDs:     segmentIDStrings,
+			Segments:       walSegments,
+			ReservationID:  info.ReservationID,
+			PassengerID:    info.PassengerID,
+			PassengerName:  info.PassengerName,
+			PassengerEmail: info.PassengerEmail,
+			UpdatedAt:      time.Now(),
 		}); err != nil {
 			log.Printf("[coordinator] erro ao persistir ABORTED no WAL tx_id=%s: %v", txID, err)
 		}
@@ -161,13 +184,17 @@ func (c *Coordinator) ConfirmItinerary(passengerID uuid.UUID, segments []models.
 	// O coordenador grava a decisão COMMIT de forma persistente no WAL com metadados completos
 	// antes de enviar qualquer mensagem de confirmação para os participantes.
 	if err := c.wal.Append(WALEntry{
-		TxID:          txID,
-		Role:          "coordinator",
-		Status:        TxCommitted,
-		CoordinatorID: c.companyID,
-		SegmentIDs:    segmentIDStrings,
-		Segments:      walSegments,
-		UpdatedAt:     time.Now(),
+		TxID:           txID,
+		Role:           "coordinator",
+		Status:         TxCommitted,
+		CoordinatorID:  c.companyID,
+		SegmentIDs:     segmentIDStrings,
+		Segments:       walSegments,
+		ReservationID:  info.ReservationID,
+		PassengerID:    info.PassengerID,
+		PassengerName:  info.PassengerName,
+		PassengerEmail: info.PassengerEmail,
+		UpdatedAt:      time.Now(),
 	}); err != nil {
 		// Falha de disco catastrófica antes de decidir commit: aborta
 		c.abortPreparedSegments(txID, preparedSegments)
@@ -184,7 +211,7 @@ func (c *Coordinator) ConfirmItinerary(passengerID uuid.UUID, segments []models.
 			txID, segment.CompanyID, segment.SegmentID,
 		)
 
-		if err := c.commitSegment(txID, segment); err != nil {
+		if err := c.commitSegment(txID, info, segment); err != nil {
 			log.Printf(
 				"[2pc] tx_id=%s role=coordinator stage=COMMIT_RESULT participant=%s result=ERROR error=%v",
 				txID, segment.CompanyID, err,
@@ -208,11 +235,11 @@ func (c *Coordinator) ConfirmItinerary(passengerID uuid.UUID, segments []models.
 	return nil
 }
 
-func (c *Coordinator) prepareSegment(txID string, lamport uint64, passengerID uuid.UUID, segment models.ReservedSegment) prepareResult {
+func (c *Coordinator) prepareSegment(txID string, lamport uint64, info PassengerBookingInfo, segment models.ReservedSegment) prepareResult {
 	if segment.CompanyID == c.companyID {
 		// Trecho sob responsabilidade desta própria empresa
 		ride, err := c.repo.GetRideByID(segment.RideID)
-		if err != nil || ride.Cancelled {
+		if err != nil || !ride.CanBook() {
 			return prepareResult{segment: segment, ok: false, reason: "carona local indisponível"}
 		}
 
@@ -220,6 +247,9 @@ func (c *Coordinator) prepareSegment(txID string, lamport uint64, passengerID uu
 		found := false
 		for _, st := range ride.Segments {
 			if st.ID == segment.SegmentID {
+				if st.GetStatus() == models.StageStatusCompleted {
+					return prepareResult{segment: segment, ok: false, reason: "trecho local já foi concluído"}
+				}
 				available = st.AvailableSeats
 				found = true
 				break
@@ -253,13 +283,23 @@ func (c *Coordinator) prepareSegment(txID string, lamport uint64, passengerID uu
 		return prepareResult{segment: segment, ok: false, reason: "empresa parceira não registrada no consórcio"}
 	}
 
-	reqBody, _ := json.Marshal(map[string]any{
+	bodyPayload := map[string]any{
 		"tx_id":                  txID,
 		"coordinator_company_id": c.companyID,
 		"lamport_clock":          lamport,
-		"passenger_id":           passengerID,
+		"passenger_id":           info.PassengerID,
 		"ride_id":                segment.RideID,
-	})
+	}
+	if info.ReservationID != uuid.Nil {
+		bodyPayload["reservation_id"] = info.ReservationID
+	}
+	if info.PassengerName != "" {
+		bodyPayload["passenger_name"] = info.PassengerName
+	}
+	if info.PassengerEmail != "" {
+		bodyPayload["passenger_email"] = info.PassengerEmail
+	}
+	reqBody, _ := json.Marshal(bodyPayload)
 
 	url := fmt.Sprintf("%s/internal/v1/segments/%s/prepare", peer.InternalURL, segment.SegmentID)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(reqBody))
@@ -335,7 +375,7 @@ func (c *Coordinator) abortPreparedSegments(txID string, segments []models.Reser
 	}
 }
 
-func (c *Coordinator) commitSegment(txID string, segment models.ReservedSegment) error {
+func (c *Coordinator) commitSegment(txID string, info PassengerBookingInfo, segment models.ReservedSegment) error {
 	if segment.CompanyID == c.companyID {
 		if err := c.repo.DecrementSeatIdempotent(segment.RideID, segment.SegmentID, txID); err != nil {
 			c.lockStore.Release(segment.SegmentID.String(), txID)
@@ -352,11 +392,24 @@ func (c *Coordinator) commitSegment(txID string, segment models.ReservedSegment)
 		return err
 	}
 
-	reqBody, _ := json.Marshal(map[string]any{
+	bodyPayload := map[string]any{
 		"tx_id":                  txID,
 		"coordinator_company_id": c.companyID,
 		"ride_id":                segment.RideID,
-	})
+	}
+	if info.ReservationID != uuid.Nil {
+		bodyPayload["reservation_id"] = info.ReservationID
+	}
+	if info.PassengerID != uuid.Nil {
+		bodyPayload["passenger_id"] = info.PassengerID
+	}
+	if info.PassengerName != "" {
+		bodyPayload["passenger_name"] = info.PassengerName
+	}
+	if info.PassengerEmail != "" {
+		bodyPayload["passenger_email"] = info.PassengerEmail
+	}
+	reqBody, _ := json.Marshal(bodyPayload)
 
 	url := fmt.Sprintf("%s/internal/v1/segments/%s/commit", peer.InternalURL, segment.SegmentID)
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(reqBody))
@@ -421,11 +474,24 @@ func (c *Coordinator) RecoverPendingCommits() {
 						}
 
 						url := fmt.Sprintf("%s/internal/v1/segments/%s/commit", peer.InternalURL, seg.SegmentID)
-						reqBody, _ := json.Marshal(map[string]any{
+						bodyPayload := map[string]any{
 							"tx_id":                  entry.TxID,
 							"coordinator_company_id": c.companyID,
 							"ride_id":                seg.RideID,
-						})
+						}
+						if entry.ReservationID != uuid.Nil {
+							bodyPayload["reservation_id"] = entry.ReservationID
+						}
+						if entry.PassengerID != uuid.Nil {
+							bodyPayload["passenger_id"] = entry.PassengerID
+						}
+						if entry.PassengerName != "" {
+							bodyPayload["passenger_name"] = entry.PassengerName
+						}
+						if entry.PassengerEmail != "" {
+							bodyPayload["passenger_email"] = entry.PassengerEmail
+						}
+						reqBody, _ := json.Marshal(bodyPayload)
 						req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(reqBody))
 						if err == nil {
 							req.Header.Set("Content-Type", "application/json")

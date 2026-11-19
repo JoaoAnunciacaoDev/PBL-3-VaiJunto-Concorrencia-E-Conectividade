@@ -19,7 +19,10 @@ Todos os endpoints utilizam o prefixo de rota `/internal/v1`.
 | `POST` | `/internal/v1/segments/:segmentID/commit` | 2PC — Fase 2 | Confirmação da reserva e decremento do assento |
 | `POST` | `/internal/v1/segments/:segmentID/abort` | 2PC — Fase 2 | Descarte da pré-reserva em caso de falha global |
 | `GET` | `/internal/v1/segments/:segmentID/status/:txID` | Recuperação Pós-Queda | Consulta o estado da transação no WAL ou LockStore |
-| `POST` | `/internal/v1/segments/:segmentID/release` | Cancelamento Descentralizado | Libera assento previamente confirmado |
+| `POST` | `/internal/v1/segments/:segmentID/release` | Cancelamento Descentralizado | Libera assento previamente confirmado e encerra vínculo de booking |
+| `POST` | `/internal/v1/reputation/records` | Reputação Distribuída | Recebe e persiste de forma idempotente um registro de reputação replicado por peer |
+| `GET` | `/internal/v1/reputation/:userID` | Reputação Distribuída | Consulta registros de reputação armazenados neste nó para o usuário |
+| `POST` | `/internal/v1/reservations/:reservationID/ride-cancelled` | Cancelamento Propagado | Notifica a empresa do passageiro que um trecho da reserva teve a carona cancelada pelo motorista |
 
 ---
 
@@ -378,6 +381,19 @@ curl -X POST http://localhost:8081/internal/v1/segments/c1f7b029-7928-48b4-9273-
     "coordinator_company_id": "empresa-a"
   }'
 ```
+
+---
+
+### 2.9. Reputação Distribuída e Propagação de Cancelamento de Carona
+
+#### `POST /internal/v1/reputation/records`
+Recebe e persiste de forma idempotente um registro de avaliação, ausência (`NO_SHOW`), cancelamento tardio (`LATE_CANCELLATION`), cancelamento pelo motorista (`DRIVER_CANCELLATION`) ou denúncia (`COMPLAINT`) replicado por outro nó do consórcio.
+
+#### `GET /internal/v1/reputation/:userID`
+Retorna os registros locais e métricas de reputação (`UserReputation`) associados ao usuário `userID` para agregação entre empresas.
+
+#### `POST /internal/v1/reservations/:reservationID/ride-cancelled`
+Chamado pelo servidor da empresa cujo motorista cancelou uma carona que possuía reserva de passageiro de outra empresa. Cancela a reserva na empresa do passageiro, restaura assentos locais da mesma reserva e propaga `release` para quaisquer terceiras empresas envolvidas no itinerário.
 
 ---
 

@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/enum"
 	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/models"
 	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/protocol"
 	"github.com/google/uuid"
@@ -216,18 +217,11 @@ func reportNoShow(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) b
 	if !ok {
 		return false
 	}
-
-	var allPassengers []protocol.UserResponse
-	seen := make(map[uuid.UUID]bool)
-	for _, seg := range paxResp.Segments {
-		for _, p := range seg.Passengers {
-			if !seen[p.ID] {
-				seen[p.ID] = true
-				allPassengers = append(allPassengers, p)
-			}
-		}
+	if paxResp == nil {
+		return true
 	}
 
+	allPassengers := uniquePassengersFromResponse(paxResp)
 	if len(allPassengers) == 0 {
 		fmt.Fprintln(output, "Nenhum passageiro confirmado encontrado nesta carona.")
 		return true
@@ -235,7 +229,7 @@ func reportNoShow(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) b
 
 	fmt.Fprintln(output, "\nPassageiros da Carona:")
 	for index, p := range allPassengers {
-		fmt.Fprintf(output, "%d - %s (%s)\n", index+1, p.Name, p.Email)
+		fmt.Fprintf(output, "%d - %s\n", index+1, formatPassengerLabel(p))
 	}
 
 	paxChoice, ok := chooseNumber(input, output, "Escolha o passageiro ausente ou 0 para voltar: ", len(allPassengers))
@@ -274,49 +268,41 @@ func ratePassenger(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) 
 		return false
 	}
 
-	var completed []models.Ride
+	var eligible []models.Ride
 	for _, r := range rides {
-		st := r.GetStatus()
-		if st == models.RideStatusCompleted || st == models.RideStatusCompletedNoShow {
-			completed = append(completed, r)
+		if hasAnyCompletedSegment(r) {
+			eligible = append(eligible, r)
 		}
 	}
 
-	if len(completed) == 0 {
-		fmt.Fprintln(output, "Nenhuma carona finalizada elegível para avaliação de passageiros.")
+	if len(eligible) == 0 {
+		fmt.Fprintln(output, "Nenhuma carona com trecho concluído elegível para avaliação de passageiros.")
 		return true
 	}
 
 	fmt.Fprintln(output, "\n=== Avaliar Passageiro ===")
-	for index, r := range completed {
+	for index, r := range eligible {
 		orig := r.Segments[0].Origin.String()
 		dest := r.Segments[len(r.Segments)-1].Destination.String()
-		fmt.Fprintf(output, "%d - %s → %s | Data: %s\n",
-			index+1, orig, dest, r.DepartureAt.Format(rideDateTimeLayout))
+		fmt.Fprintf(output, "%d - %s → %s | Data: %s | Status: %s\n",
+			index+1, orig, dest, r.DepartureAt.Format(rideDateTimeLayout), rideStatusLabel(r.GetStatus()))
 	}
 
-	choice, ok := chooseNumber(input, output, "Escolha a carona finalizada ou 0 para voltar: ", len(completed))
+	choice, ok := chooseNumber(input, output, "Escolha a carona ou 0 para voltar: ", len(eligible))
 	if !ok || choice == 0 {
 		return true
 	}
-	selectedRide := completed[choice-1]
+	selectedRide := eligible[choice-1]
 
 	paxResp, ok := fetchRidePassengers(tcpClient, selectedRide.ID, output)
 	if !ok {
 		return false
 	}
-
-	var allPassengers []protocol.UserResponse
-	seen := make(map[uuid.UUID]bool)
-	for _, seg := range paxResp.Segments {
-		for _, p := range seg.Passengers {
-			if !seen[p.ID] {
-				seen[p.ID] = true
-				allPassengers = append(allPassengers, p)
-			}
-		}
+	if paxResp == nil {
+		return true
 	}
 
+	allPassengers := uniquePassengersFromResponse(paxResp)
 	if len(allPassengers) == 0 {
 		fmt.Fprintln(output, "Nenhum passageiro encontrado nesta carona.")
 		return true
@@ -324,7 +310,7 @@ func ratePassenger(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) 
 
 	fmt.Fprintln(output, "\nPassageiros:")
 	for index, p := range allPassengers {
-		fmt.Fprintf(output, "%d - %s (%s)\n", index+1, p.Name, p.Email)
+		fmt.Fprintf(output, "%d - %s\n", index+1, formatPassengerLabel(p))
 	}
 
 	paxChoice, ok := chooseNumber(input, output, "Escolha o passageiro para avaliar ou 0 para voltar: ", len(allPassengers))
@@ -369,22 +355,52 @@ func rateDriver(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) boo
 		return false
 	}
 
-	if len(reservations) == 0 {
-		fmt.Fprintln(output, "Nenhuma reserva encontrada.")
+	var confirmed []protocol.ReservationResponse
+	for _, r := range reservations {
+		if r.Status == enum.Confirmada {
+			confirmed = append(confirmed, r)
+		}
+	}
+
+	if len(confirmed) == 0 {
+		fmt.Fprintln(output, "Nenhuma reserva confirmada encontrada para avaliação.")
 		return true
 	}
 
 	fmt.Fprintln(output, "\n=== Avaliar Motorista ===")
-	for index, res := range reservations {
-		fmt.Fprintf(output, "%d - Reserva %s | %d trecho(s) | Status: %s\n",
-			index+1, res.ID.String()[:8], len(res.Segments), res.Status)
+	for index, res := range confirmed {
+		fmt.Fprintf(output, "%d - Reserva %s | %d trecho(s) | Criada em: %s\n",
+			index+1, res.ID.String()[:8], len(res.Segments), res.CreatedAt.Format(rideDateTimeLayout))
 	}
 
-	choice, ok := chooseNumber(input, output, "Escolha a reserva ou 0 para voltar: ", len(reservations))
+	choice, ok := chooseNumber(input, output, "Escolha a reserva ou 0 para voltar: ", len(confirmed))
 	if !ok || choice == 0 {
 		return true
 	}
-	selectedRes := reservations[choice-1]
+	selectedRes := confirmed[choice-1]
+
+	if len(selectedRes.Segments) == 0 {
+		fmt.Fprintln(output, "A reserva selecionada não possui trechos.")
+		return true
+	}
+
+	selectedSeg := selectedRes.Segments[0]
+	if len(selectedRes.Segments) > 1 {
+		fmt.Fprintln(output, "\nTrechos da reserva:")
+		for index, seg := range selectedRes.Segments {
+			driverInfo := seg.DriverName
+			if driverInfo == "" {
+				driverInfo = "Motorista não informado"
+			}
+			fmt.Fprintf(output, "%d - %s → %s | Empresa: %s | Motorista: %s [%s]\n",
+				index+1, seg.Origin, seg.Destination, seg.CompanyID, driverInfo, stageStatusLabel(seg.Status))
+		}
+		segChoice, ok := chooseNumber(input, output, "Escolha o trecho/motorista para avaliar ou 0 para voltar: ", len(selectedRes.Segments))
+		if !ok || segChoice == 0 {
+			return true
+		}
+		selectedSeg = selectedRes.Segments[segChoice-1]
+	}
 
 	score, ok := chooseNumber(input, output, "Nota de 1 a 5 para a viagem: ", 5)
 	if !ok || score < 1 {
@@ -398,12 +414,158 @@ func rateDriver(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) boo
 
 	payload, _ := json.Marshal(protocol.RateDriverRequest{
 		ReservationID: selectedRes.ID,
+		RideID:        selectedSeg.RideID,
+		SegmentID:     selectedSeg.SegmentID,
+		DriverID:      selectedSeg.DriverID,
 		Score:         score,
 		Comment:       comment,
 	})
 
 	resp, err := tcpClient.Send(protocol.Request{
 		Action:  protocol.ActionRateDriver,
+		Payload: payload,
+	})
+	if err != nil {
+		fmt.Fprintf(output, "Erro de comunicação: %v\n", err)
+		return false
+	}
+
+	fmt.Fprintln(output, resp.Message)
+	return true
+}
+
+func filePassengerComplaint(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) bool {
+	reservations, ok := getMyReservations(tcpClient, output)
+	if !ok {
+		return false
+	}
+
+	var confirmed []protocol.ReservationResponse
+	for _, r := range reservations {
+		if r.Status == enum.Confirmada {
+			confirmed = append(confirmed, r)
+		}
+	}
+
+	if len(confirmed) == 0 {
+		fmt.Fprintln(output, "Nenhuma reserva confirmada encontrada para registrar denúncia.")
+		return true
+	}
+
+	fmt.Fprintln(output, "\n=== Registrar Denúncia contra Motorista ===")
+	for index, res := range confirmed {
+		fmt.Fprintf(output, "%d - Reserva %s | %d trecho(s)\n",
+			index+1, res.ID.String()[:8], len(res.Segments))
+	}
+
+	choice, ok := chooseNumber(input, output, "Escolha a reserva ou 0 para voltar: ", len(confirmed))
+	if !ok || choice == 0 {
+		return true
+	}
+	selectedRes := confirmed[choice-1]
+
+	selectedSeg := selectedRes.Segments[0]
+	if len(selectedRes.Segments) > 1 {
+		fmt.Fprintln(output, "\nTrechos da reserva:")
+		for index, seg := range selectedRes.Segments {
+			fmt.Fprintf(output, "%d - %s → %s | Empresa: %s | Motorista: %s\n",
+				index+1, seg.Origin, seg.Destination, seg.CompanyID, seg.DriverName)
+		}
+		segChoice, ok := chooseNumber(input, output, "Escolha o trecho/motorista a denunciar ou 0 para voltar: ", len(selectedRes.Segments))
+		if !ok || segChoice == 0 {
+			return true
+		}
+		selectedSeg = selectedRes.Segments[segChoice-1]
+	}
+
+	comment, err := readLine(input, output, "Descreva o motivo da denúncia: ")
+	if err != nil {
+		return true
+	}
+
+	payload, _ := json.Marshal(protocol.FileComplaintRequest{
+		ReservationID: selectedRes.ID,
+		RideID:        selectedSeg.RideID,
+		TargetID:      selectedSeg.DriverID,
+		Comment:       comment,
+	})
+
+	resp, err := tcpClient.Send(protocol.Request{
+		Action:  protocol.ActionFileComplaint,
+		Payload: payload,
+	})
+	if err != nil {
+		fmt.Fprintf(output, "Erro de comunicação: %v\n", err)
+		return false
+	}
+
+	fmt.Fprintln(output, resp.Message)
+	return true
+}
+
+func fileDriverComplaint(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) bool {
+	rides, ok := getMyRides(tcpClient, output)
+	if !ok {
+		return false
+	}
+
+	if len(rides) == 0 {
+		fmt.Fprintln(output, "Nenhuma carona encontrada.")
+		return true
+	}
+
+	fmt.Fprintln(output, "\n=== Registrar Denúncia contra Passageiro ===")
+	for index, r := range rides {
+		orig := r.Segments[0].Origin.String()
+		dest := r.Segments[len(r.Segments)-1].Destination.String()
+		fmt.Fprintf(output, "%d - %s → %s | %s (%s)\n",
+			index+1, orig, dest, r.DepartureAt.Format(rideDateTimeLayout), rideStatusLabel(r.GetStatus()))
+	}
+
+	choice, ok := chooseNumber(input, output, "Escolha a carona ou 0 para voltar: ", len(rides))
+	if !ok || choice == 0 {
+		return true
+	}
+	selectedRide := rides[choice-1]
+
+	paxResp, ok := fetchRidePassengers(tcpClient, selectedRide.ID, output)
+	if !ok {
+		return false
+	}
+	if paxResp == nil {
+		return true
+	}
+
+	allPassengers := uniquePassengersFromResponse(paxResp)
+	if len(allPassengers) == 0 {
+		fmt.Fprintln(output, "Nenhum passageiro confirmado encontrado nesta carona.")
+		return true
+	}
+
+	fmt.Fprintln(output, "\nPassageiros:")
+	for index, p := range allPassengers {
+		fmt.Fprintf(output, "%d - %s\n", index+1, formatPassengerLabel(p))
+	}
+
+	paxChoice, ok := chooseNumber(input, output, "Escolha o passageiro a denunciar ou 0 para voltar: ", len(allPassengers))
+	if !ok || paxChoice == 0 {
+		return true
+	}
+	selectedPax := allPassengers[paxChoice-1]
+
+	comment, err := readLine(input, output, "Descreva o motivo da denúncia: ")
+	if err != nil {
+		return true
+	}
+
+	payload, _ := json.Marshal(protocol.FileComplaintRequest{
+		RideID:   selectedRide.ID,
+		TargetID: selectedPax.ID,
+		Comment:  comment,
+	})
+
+	resp, err := tcpClient.Send(protocol.Request{
+		Action:  protocol.ActionFileComplaint,
 		Payload: payload,
 	})
 	if err != nil {
@@ -458,14 +620,13 @@ func viewReputation(tcpClient *TCPClient, input *bufio.Reader, output io.Writer)
 	fmt.Fprintf(output, "Média de Avaliações: %.2f / 5.0 (Total: %d)\n", rep.AverageScore, rep.TotalRatings)
 	fmt.Fprintf(output, "Ocorrências de No-Show: %d\n", rep.NoShowCount)
 	fmt.Fprintf(output, "Cancelamentos Tardios: %d\n", rep.LateCancelledCount)
+	fmt.Fprintf(output, "Denúncias Recebidas: %d\n", rep.ComplaintCount)
+	fmt.Fprintf(output, "Cancelamentos de Carona (Motorista): %d\n", rep.DriverCancelledCount)
 
 	if len(rep.Ratings) > 0 {
 		fmt.Fprintln(output, "\nHistórico de Registros:")
 		for idx, r := range rep.Ratings {
-			scoreStr := fmt.Sprintf("%d/5", r.Score)
-			if r.Type == models.RatingTypeNoShow {
-				scoreStr = "[OCORRÊNCIA NO-SHOW]"
-			}
+			scoreStr := ratingEntryLabel(r)
 			fmt.Fprintf(output, "  %d. %s por %s | %s\n     \"%s\" (%s)\n",
 				idx+1, r.Type, r.AuthorName, scoreStr, r.Comment, r.CreatedAt.Format("02/01/2006 15:04"))
 		}
@@ -474,6 +635,55 @@ func viewReputation(tcpClient *TCPClient, input *bufio.Reader, output io.Writer)
 	}
 
 	return true
+}
+
+func ratingEntryLabel(r models.Rating) string {
+	switch r.Type {
+	case models.RatingTypeNoShow:
+		return "[OCORRÊNCIA NO-SHOW]"
+	case models.RatingTypeLateCancellation:
+		return "[CANCELAMENTO TARDIO]"
+	case models.RatingTypeComplaint:
+		return "[DENÚNCIA]"
+	case models.RatingTypeDriverCancellation:
+		return "[CANCELAMENTO DE CARONA]"
+	default:
+		return fmt.Sprintf("%d/5", r.Score)
+	}
+}
+
+func hasAnyCompletedSegment(ride models.Ride) bool {
+	st := ride.GetStatus()
+	if st == models.RideStatusCompleted || st == models.RideStatusCompletedNoShow {
+		return true
+	}
+	for _, seg := range ride.Segments {
+		if seg.GetStatus() == models.StageStatusCompleted {
+			return true
+		}
+	}
+	return false
+}
+
+func formatPassengerLabel(p protocol.UserResponse) string {
+	if p.CompanyID != "" {
+		return fmt.Sprintf("%s (%s) [%s]", p.Name, p.Email, p.CompanyID)
+	}
+	return fmt.Sprintf("%s (%s)", p.Name, p.Email)
+}
+
+func uniquePassengersFromResponse(paxResp *protocol.RidePassengersResponse) []protocol.UserResponse {
+	var allPassengers []protocol.UserResponse
+	seen := make(map[uuid.UUID]bool)
+	for _, seg := range paxResp.Segments {
+		for _, p := range seg.Passengers {
+			if !seen[p.ID] {
+				seen[p.ID] = true
+				allPassengers = append(allPassengers, p)
+			}
+		}
+	}
+	return allPassengers
 }
 
 func fetchRidePassengers(tcpClient *TCPClient, rideID uuid.UUID, output io.Writer) (*protocol.RidePassengersResponse, bool) {

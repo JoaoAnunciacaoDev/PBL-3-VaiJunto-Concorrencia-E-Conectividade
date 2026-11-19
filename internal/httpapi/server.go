@@ -25,22 +25,39 @@ type RepositoryReader interface {
 	IncrementSeat(rideID, segmentID uuid.UUID) error
 	DecrementSeatIdempotent(rideID, segmentID uuid.UUID, txID string) error
 	IsTxApplied(txID string, segmentID uuid.UUID) bool
+	SaveSegmentBooking(booking *models.SegmentBooking) error
+	CancelSegmentBooking(segmentID, reservationID, passengerID uuid.UUID) error
+	SaveRating(rating *models.Rating) error
+	GetReputationByUserID(userID uuid.UUID) (*models.UserReputation, error)
+	CancelReservationByRideCancellation(reservationID uuid.UUID, companyID string) ([]models.ReservedSegment, error)
+}
+
+type txPrepareMeta struct {
+	RideID               uuid.UUID
+	ReservationID        uuid.UUID
+	PassengerID          uuid.UUID
+	PassengerName        string
+	PassengerEmail       string
+	CoordinatorCompanyID string
 }
 
 // HTTPServer encapsula o servidor REST em Gin para comunicação inter-servidores.
 type HTTPServer struct {
-	companyID  string
-	addr       string
-	actualAddr string
-	listener   net.Listener
-	mu         sync.Mutex
-	repo       RepositoryReader
-	lockStore  *consortium.LockStore
-	wal        *consortium.WAL
-	clock      *consortium.LamportClock
-	engine     *gin.Engine
-	httpServer *http.Server
-	stopChan   chan struct{}
+	companyID            string
+	addr                 string
+	actualAddr           string
+	listener             net.Listener
+	mu                   sync.Mutex
+	repo                 RepositoryReader
+	lockStore            *consortium.LockStore
+	wal                  *consortium.WAL
+	clock                *consortium.LamportClock
+	engine               *gin.Engine
+	httpServer           *http.Server
+	stopChan             chan struct{}
+	txMetaMu             sync.RWMutex
+	txMeta               map[string]txPrepareMeta
+	rideCancelledHandler func(reservationID uuid.UUID, cancelledCompanyID string) error
 }
 
 // NewHTTPServer cria e configura a instância do servidor HTTP com suas rotas internas.
@@ -65,10 +82,19 @@ func NewHTTPServer(
 		clock:     clock,
 		engine:    engine,
 		stopChan:  make(chan struct{}),
+		txMeta:    make(map[string]txPrepareMeta),
 	}
 
 	s.setupRoutes()
 	return s
+}
+
+// SetRideCancelledHandler registra o callback chamado quando uma empresa parceira cancela
+// uma carona que possuía reservas originadas nesta empresa.
+func (s *HTTPServer) SetRideCancelledHandler(fn func(reservationID uuid.UUID, cancelledCompanyID string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rideCancelledHandler = fn
 }
 
 func (s *HTTPServer) setupRoutes() {
@@ -84,6 +110,11 @@ func (s *HTTPServer) setupRoutes() {
 		v1.POST("/segments/:segmentID/abort", s.handleAbort)
 		v1.GET("/segments/:segmentID/status/:txID", s.handleStatus)
 		v1.POST("/segments/:segmentID/release", s.handleRelease)
+
+		// Endpoints de reputação e propagação de cancelamento de carona
+		v1.POST("/reputation/records", s.handleReceiveReputationRecord)
+		v1.GET("/reputation/:userID", s.handleGetReputation)
+		v1.POST("/reservations/:reservationID/ride-cancelled", s.handleRemoteRideCancelled)
 	}
 }
 

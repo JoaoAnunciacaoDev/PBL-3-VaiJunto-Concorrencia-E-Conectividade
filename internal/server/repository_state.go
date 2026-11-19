@@ -16,15 +16,18 @@ const persistentStateVersion = 1
 // atômica. Uma reserva confirmada e os assentos correspondentes passam a ser
 // gravados no mesmo arquivo e no mesmo rename.
 type PersistentState struct {
-	Version             int                  `json:"version"`
-	Users               []storedUser         `json:"users"`
-	Drivers             []storedDriver       `json:"drivers"`
-	Rides               []models.Ride        `json:"rides"`
-	Reservations        []models.Reservation `json:"reservations"`
-	Ratings             []models.Rating      `json:"ratings,omitempty"`
-	AppliedTransactions []string             `json:"applied_transactions,omitempty"`
+	Version             int                     `json:"version"`
+	Users               []storedUser            `json:"users"`
+	Drivers             []storedDriver          `json:"drivers"`
+	Rides               []models.Ride           `json:"rides"`
+	Reservations        []models.Reservation    `json:"reservations"`
+	Bookings            []models.SegmentBooking `json:"bookings,omitempty"`
+	Ratings             []models.Rating         `json:"ratings,omitempty"`
+	AppliedTransactions []string                `json:"applied_transactions,omitempty"`
 }
 
+// saveStateLocked persiste o snapshot completo de estado em disco.
+// Todos os mutadores devem adquirir r.writeMu antes dos demais locks de entidade.
 func (r *Repository) saveStateLocked() error {
 	state := r.persistentStateLocked()
 	return writeJSONFileAtomic(r.statePath, ".state-*.tmp", state, r.beforeStateRename)
@@ -38,6 +41,7 @@ func (r *Repository) persistentStateLocked() PersistentState {
 		state.Users = append(state.Users, storedUser{
 			ID: user.ID, Name: user.Name, Email: user.Email,
 			PasswordHash: user.PasswordHash, Role: user.Role,
+			WalletAddress: user.WalletAddress, IdentityHash: user.IdentityHash,
 		})
 	}
 	sort.Slice(state.Users, func(i, j int) bool { return state.Users[i].Email < state.Users[j].Email })
@@ -67,6 +71,17 @@ func (r *Repository) persistentStateLocked() PersistentState {
 	}
 	sort.Slice(state.Reservations, func(i, j int) bool {
 		return state.Reservations[i].CreatedAt.Before(state.Reservations[j].CreatedAt)
+	})
+
+	state.Bookings = make([]models.SegmentBooking, 0, len(r.bookings))
+	for _, booking := range r.bookings {
+		state.Bookings = append(state.Bookings, *cloneSegmentBooking(booking))
+	}
+	sort.Slice(state.Bookings, func(i, j int) bool {
+		if !state.Bookings[i].CreatedAt.Equal(state.Bookings[j].CreatedAt) {
+			return state.Bookings[i].CreatedAt.Before(state.Bookings[j].CreatedAt)
+		}
+		return state.Bookings[i].ID.String() < state.Bookings[j].ID.String()
 	})
 
 	state.Ratings = make([]models.Rating, 0, len(r.ratings))
@@ -107,6 +122,7 @@ func (r *Repository) loadPersistentState() error {
 		r.users[email] = &models.User{
 			ID: stored.ID, Name: stored.Name, Email: email,
 			PasswordHash: stored.PasswordHash, Role: stored.Role,
+			WalletAddress: stored.WalletAddress, IdentityHash: stored.IdentityHash,
 		}
 	}
 
@@ -147,6 +163,13 @@ func (r *Repository) loadPersistentState() error {
 			return errors.New("estado contém reservas duplicadas")
 		}
 		r.reservations[reservation.ID] = cloneReservation(&reservation)
+	}
+
+	for _, booking := range state.Bookings {
+		if booking.ID == uuid.Nil {
+			continue
+		}
+		r.bookings[booking.ID] = cloneSegmentBooking(&booking)
 	}
 
 	for _, rating := range state.Ratings {

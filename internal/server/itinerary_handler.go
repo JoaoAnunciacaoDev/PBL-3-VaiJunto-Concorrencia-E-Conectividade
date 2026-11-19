@@ -15,10 +15,11 @@ import (
 )
 
 type itineraryEdge struct {
-	companyID string
+	companyID  string
 	rideID     uuid.UUID
+	driverID   uuid.UUID
 	driverName string
-	stage     models.Stage
+	stage      models.Stage
 }
 
 type RideSource struct {
@@ -73,6 +74,9 @@ func (s *Server) handleSearchItineraries(payload json.RawMessage, session *Sessi
 				continue
 			}
 			for _, ride := range remoteRides {
+				if !ride.CanBook() {
+					continue
+				}
 				if ride.CompanyID == "" {
 					ride.CompanyID = peer.CompanyID
 				}
@@ -85,6 +89,27 @@ func (s *Server) handleSearchItineraries(payload json.RawMessage, session *Sessi
 	}
 
 	itineraries := searchItinerariesFromSources(sources, dto.Origin, dto.Destination)
+
+	// Enriquece cada trecho retornado com a reputação consolidada do motorista no consórcio
+	repCache := make(map[uuid.UUID]*models.UserReputation)
+	for i := range itineraries {
+		for j := range itineraries[i].Segments {
+			driverID := itineraries[i].Segments[j].DriverID
+			if driverID == uuid.Nil {
+				continue
+			}
+			rep, cached := repCache[driverID]
+			if !cached {
+				rep, _ = s.getAggregatedReputation(driverID)
+				repCache[driverID] = rep
+			}
+			if rep != nil {
+				itineraries[i].Segments[j].DriverRating = rep.AverageScore
+				itineraries[i].Segments[j].DriverRatingCount = rep.TotalRatings
+			}
+		}
+	}
+
 	return rideResponse(itineraries, "Itinerários obtidos com sucesso.")
 }
 
@@ -142,13 +167,17 @@ func searchItineraries(rides []*models.Ride, origin, destination enum.City) []pr
 func searchItinerariesFromSources(sources []RideSource, origin, destination enum.City) []protocol.ItineraryResponse {
 	edgesByOrigin := make(map[enum.City][]itineraryEdge)
 	for _, src := range sources {
+		if !src.Ride.CanBook() {
+			continue
+		}
 		for _, stage := range src.Ride.Segments {
-			if stage.AvailableSeats > 0 {
+			if stage.AvailableSeats > 0 && stage.GetStatus() != models.StageStatusCompleted {
 				edgesByOrigin[stage.Origin] = append(edgesByOrigin[stage.Origin], itineraryEdge{
-					companyID: src.CompanyID,
+					companyID:  src.CompanyID,
 					rideID:     src.Ride.ID,
+					driverID:   src.Ride.DriverID,
 					driverName: src.Ride.DriverName,
-					stage:     stage,
+					stage:      stage,
 				})
 			}
 		}
@@ -214,6 +243,7 @@ func itineraryFromPath(path []itineraryEdge) protocol.ItineraryResponse {
 			RideID:         edge.rideID,
 			SegmentID:      edge.stage.ID,
 			CompanyID:      edge.companyID,
+			DriverID:       edge.driverID,
 			DriverName:     edge.driverName,
 			Origin:         edge.stage.Origin,
 			Destination:    edge.stage.Destination,

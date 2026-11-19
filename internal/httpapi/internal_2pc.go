@@ -3,10 +3,10 @@ package httpapi
 import (
 	"log"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/consortium"
+	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/models"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -16,7 +16,10 @@ type PrepareRequest struct {
 	TxID                 string    `json:"tx_id" binding:"required"`
 	CoordinatorCompanyID string    `json:"coordinator_company_id" binding:"required"`
 	LamportClock         uint64    `json:"lamport_clock"`
+	ReservationID        uuid.UUID `json:"reservation_id,omitempty"`
 	PassengerID          uuid.UUID `json:"passenger_id" binding:"required"`
+	PassengerName        string    `json:"passenger_name,omitempty"`
+	PassengerEmail       string    `json:"passenger_email,omitempty"`
 	RideID               uuid.UUID `json:"ride_id" binding:"required"`
 }
 
@@ -32,6 +35,10 @@ type CommitRequest struct {
 	TxID                 string    `json:"tx_id" binding:"required"`
 	CoordinatorCompanyID string    `json:"coordinator_company_id" binding:"required"`
 	RideID               uuid.UUID `json:"ride_id"`
+	ReservationID        uuid.UUID `json:"reservation_id,omitempty"`
+	PassengerID          uuid.UUID `json:"passenger_id,omitempty"`
+	PassengerName        string    `json:"passenger_name,omitempty"`
+	PassengerEmail       string    `json:"passenger_email,omitempty"`
 }
 
 // CommitResponse responde ao coordenador sobre a efetivação da reserva.
@@ -58,29 +65,23 @@ type StatusResponse struct {
 	Status    string `json:"status"` // "PREPARED", "COMMITTED", "NOT_FOUND"
 }
 
-// Mapa auxiliar em memória para mapear segmentID -> rideID durante transações 2PC ativas
-var (
-	txRideMapMu sync.RWMutex
-	txRideMap   = make(map[string]uuid.UUID) // chave: segmentID:txID -> rideID
-)
-
-func setTxRide(segmentID, txID string, rideID uuid.UUID) {
-	txRideMapMu.Lock()
-	defer txRideMapMu.Unlock()
-	txRideMap[segmentID+":"+txID] = rideID
+func (s *HTTPServer) setTxMeta(segmentID, txID string, meta txPrepareMeta) {
+	s.txMetaMu.Lock()
+	defer s.txMetaMu.Unlock()
+	s.txMeta[segmentID+":"+txID] = meta
 }
 
-func getTxRide(segmentID, txID string) (uuid.UUID, bool) {
-	txRideMapMu.RLock()
-	defer txRideMapMu.RUnlock()
-	rideID, exists := txRideMap[segmentID+":"+txID]
-	return rideID, exists
+func (s *HTTPServer) getTxMeta(segmentID, txID string) (txPrepareMeta, bool) {
+	s.txMetaMu.RLock()
+	defer s.txMetaMu.RUnlock()
+	meta, exists := s.txMeta[segmentID+":"+txID]
+	return meta, exists
 }
 
-func deleteTxRide(segmentID, txID string) {
-	txRideMapMu.Lock()
-	defer txRideMapMu.Unlock()
-	delete(txRideMap, segmentID+":"+txID)
+func (s *HTTPServer) deleteTxMeta(segmentID, txID string) {
+	s.txMetaMu.Lock()
+	defer s.txMetaMu.Unlock()
+	delete(s.txMeta, segmentID+":"+txID)
 }
 
 func (s *HTTPServer) handlePrepare(c *gin.Context) {
@@ -107,7 +108,7 @@ func (s *HTTPServer) handlePrepare(c *gin.Context) {
 
 	// 2. Consulta a carona e verifica a disponibilidade física do assento
 	ride, err := s.repo.GetRideByID(req.RideID)
-	if err != nil || ride.Cancelled {
+	if err != nil || !ride.CanBook() {
 		c.JSON(http.StatusConflict, PrepareResponse{
 			OK:           false,
 			LamportClock: currentClock,
@@ -120,6 +121,14 @@ func (s *HTTPServer) handlePrepare(c *gin.Context) {
 	foundSegment := false
 	for _, stage := range ride.Segments {
 		if stage.ID == segmentID {
+			if stage.GetStatus() == models.StageStatusCompleted {
+				c.JSON(http.StatusConflict, PrepareResponse{
+					OK:           false,
+					LamportClock: currentClock,
+					Reason:       "segment_already_completed",
+				})
+				return
+			}
 			availableSeats = stage.AvailableSeats
 			foundSegment = true
 			break
@@ -159,7 +168,7 @@ func (s *HTTPServer) handlePrepare(c *gin.Context) {
 			SegmentIDs:    []string{segmentIDParam},
 			UpdatedAt:     time.Now(),
 		})
-		deleteTxRide(segmentIDParam, evictedTxID)
+		s.deleteTxMeta(segmentIDParam, evictedTxID)
 	}
 
 	if !acquired {
@@ -174,22 +183,33 @@ func (s *HTTPServer) handlePrepare(c *gin.Context) {
 	// 4. Marca o lock como PREPARADO na memória para impedir desalojamentos e expiração por TTL
 	s.lockStore.MarkPrepared(segmentIDParam, req.TxID)
 
-	// 5. Salva o mapeamento temporário para o commit
-	setTxRide(segmentIDParam, req.TxID, req.RideID)
+	// 5. Salva os metadados temporários para o commit
+	s.setTxMeta(segmentIDParam, req.TxID, txPrepareMeta{
+		RideID:               req.RideID,
+		ReservationID:        req.ReservationID,
+		PassengerID:          req.PassengerID,
+		PassengerName:        req.PassengerName,
+		PassengerEmail:       req.PassengerEmail,
+		CoordinatorCompanyID: req.CoordinatorCompanyID,
+	})
 
 	// 6. Registra o PREPARE de forma durável no Write-Ahead Log
 	// Se a escrita no disco falhar, o voto afirmativo NÃO PODE ser emitido!
 	if err := s.wal.Append(consortium.WALEntry{
-		TxID:          req.TxID,
-		Role:          "participant",
-		Status:        consortium.TxPrepared,
-		CoordinatorID: req.CoordinatorCompanyID,
-		SegmentIDs:    []string{segmentIDParam},
-		UpdatedAt:     time.Now(),
+		TxID:           req.TxID,
+		Role:           "participant",
+		Status:         consortium.TxPrepared,
+		CoordinatorID:  req.CoordinatorCompanyID,
+		SegmentIDs:     []string{segmentIDParam},
+		ReservationID:  req.ReservationID,
+		PassengerID:    req.PassengerID,
+		PassengerName:  req.PassengerName,
+		PassengerEmail: req.PassengerEmail,
+		UpdatedAt:      time.Now(),
 	}); err != nil {
 		log.Printf("[httpapi] falha crítica ao registrar PREPARED no WAL tx_id=%s: %v", req.TxID, err)
 		s.lockStore.Release(segmentIDParam, req.TxID)
-		deleteTxRide(segmentIDParam, req.TxID)
+		s.deleteTxMeta(segmentIDParam, req.TxID)
 		c.JSON(http.StatusInternalServerError, PrepareResponse{
 			OK:           false,
 			LamportClock: currentClock,
@@ -231,7 +251,7 @@ func (s *HTTPServer) handleCommit(c *gin.Context) {
 	s.clock.Tick()
 
 	// 1. Consulta o estado da transação no WAL segundo a máquina de estados
-	txState, _, err := s.wal.GetTxState(req.TxID)
+	txState, walEntries, err := s.wal.GetTxState(req.TxID)
 	if err != nil {
 		log.Printf("[httpapi] erro ao consultar estado no WAL tx_id=%s: %v", req.TxID, err)
 		c.JSON(http.StatusInternalServerError, CommitResponse{OK: false, Reason: "wal_read_error"})
@@ -246,12 +266,12 @@ func (s *HTTPServer) handleCommit(c *gin.Context) {
 		return
 	}
 
+	meta, hasMeta := s.getTxMeta(segmentIDParam, req.TxID)
+
 	// 2. Determina a carona
 	rideID := req.RideID
-	if rideID == uuid.Nil {
-		if mappedRideID, exists := getTxRide(segmentIDParam, req.TxID); exists {
-			rideID = mappedRideID
-		}
+	if rideID == uuid.Nil && hasMeta {
+		rideID = meta.RideID
 	}
 	if rideID == uuid.Nil {
 		// Tenta encontrar a carona pelo segmento se não veio na requisição
@@ -281,8 +301,12 @@ func (s *HTTPServer) handleCommit(c *gin.Context) {
 			}
 		}
 
+		if err := s.persistBookingFromCommit(req, meta, walEntries, segmentID, rideID); err != nil {
+			log.Printf("[httpapi] erro ao salvar booking idempotente tx_id=%s: %v", req.TxID, err)
+		}
+
 		s.lockStore.Release(segmentIDParam, req.TxID)
-		deleteTxRide(segmentIDParam, req.TxID)
+		s.deleteTxMeta(segmentIDParam, req.TxID)
 		c.JSON(http.StatusOK, CommitResponse{OK: true})
 		return
 	}
@@ -334,9 +358,18 @@ func (s *HTTPServer) handleCommit(c *gin.Context) {
 		return
 	}
 
+	if err := s.persistBookingFromCommit(req, meta, walEntries, segmentID, rideID); err != nil {
+		log.Printf("[httpapi] erro ao salvar booking remoto tx_id=%s: %v", req.TxID, err)
+		c.JSON(http.StatusInternalServerError, CommitResponse{
+			OK:     false,
+			Reason: err.Error(),
+		})
+		return
+	}
+
 	// 7. Libera o lock de pré-reserva e limpa mapeamentos em memória
 	s.lockStore.Release(segmentIDParam, req.TxID)
-	deleteTxRide(segmentIDParam, req.TxID)
+	s.deleteTxMeta(segmentIDParam, req.TxID)
 
 	log.Printf(
 		"[2pc] tx_id=%s role=participant company=%s stage=COMMITTED segment_id=%s result=SUCCESS",
@@ -344,6 +377,66 @@ func (s *HTTPServer) handleCommit(c *gin.Context) {
 	)
 
 	c.JSON(http.StatusOK, CommitResponse{OK: true})
+}
+
+func (s *HTTPServer) persistBookingFromCommit(
+	req CommitRequest,
+	meta txPrepareMeta,
+	walEntries []consortium.WALEntry,
+	segmentID, rideID uuid.UUID,
+) error {
+	resID := req.ReservationID
+	paxID := req.PassengerID
+	paxName := req.PassengerName
+	paxEmail := req.PassengerEmail
+	companyID := req.CoordinatorCompanyID
+
+	if resID == uuid.Nil {
+		resID = meta.ReservationID
+	}
+	if paxID == uuid.Nil {
+		paxID = meta.PassengerID
+	}
+	if paxName == "" {
+		paxName = meta.PassengerName
+	}
+	if paxEmail == "" {
+		paxEmail = meta.PassengerEmail
+	}
+	if companyID == "" {
+		companyID = meta.CoordinatorCompanyID
+	}
+
+	for _, entry := range walEntries {
+		if resID == uuid.Nil && entry.ReservationID != uuid.Nil {
+			resID = entry.ReservationID
+		}
+		if paxID == uuid.Nil && entry.PassengerID != uuid.Nil {
+			paxID = entry.PassengerID
+		}
+		if paxName == "" && entry.PassengerName != "" {
+			paxName = entry.PassengerName
+		}
+		if paxEmail == "" && entry.PassengerEmail != "" {
+			paxEmail = entry.PassengerEmail
+		}
+	}
+
+	if paxID == uuid.Nil {
+		return nil
+	}
+
+	return s.repo.SaveSegmentBooking(&models.SegmentBooking{
+		TxID:           req.TxID,
+		ReservationID:  resID,
+		RideID:         rideID,
+		SegmentID:      segmentID,
+		PassengerID:    paxID,
+		PassengerName:  paxName,
+		PassengerEmail: paxEmail,
+		CompanyID:      companyID,
+		CreatedAt:      time.Now(),
+	})
 }
 
 func (s *HTTPServer) handleAbort(c *gin.Context) {
@@ -386,7 +479,7 @@ func (s *HTTPServer) handleAbort(c *gin.Context) {
 
 	// 4. Libera lock se ainda estiver ativo para esse txID
 	s.lockStore.Release(segmentIDParam, req.TxID)
-	deleteTxRide(segmentIDParam, req.TxID)
+	s.deleteTxMeta(segmentIDParam, req.TxID)
 
 	// 5. Registra o abort no WAL tratando possíveis falhas de escrita
 	if err := s.wal.Append(consortium.WALEntry{
@@ -443,6 +536,8 @@ func (s *HTTPServer) handleStatus(c *gin.Context) {
 // ReleaseRequest carrega os parâmetros para liberação de assento decorrente de cancelamento.
 type ReleaseRequest struct {
 	RideID               uuid.UUID `json:"ride_id"`
+	ReservationID        uuid.UUID `json:"reservation_id,omitempty"`
+	PassengerID          uuid.UUID `json:"passenger_id,omitempty"`
 	CoordinatorCompanyID string    `json:"coordinator_company_id"`
 }
 
@@ -478,6 +573,8 @@ func (s *HTTPServer) handleRelease(c *gin.Context) {
 		c.JSON(http.StatusConflict, ReleaseResponse{OK: false, Reason: err.Error()})
 		return
 	}
+
+	_ = s.repo.CancelSegmentBooking(segmentID, req.ReservationID, req.PassengerID)
 
 	s.clock.Tick()
 	log.Printf("[httpapi] assento do trecho %s liberado via release", segmentID)

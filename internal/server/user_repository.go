@@ -10,11 +10,13 @@ import (
 )
 
 type storedUser struct {
-	ID           uuid.UUID       `json:"uuid"`
-	Name         string          `json:"name"`
-	Email        string          `json:"email"`
-	PasswordHash string          `json:"password_hash"`
-	Role         models.UserRole `json:"role"`
+	ID            uuid.UUID       `json:"uuid"`
+	Name          string          `json:"name"`
+	Email         string          `json:"email"`
+	PasswordHash  string          `json:"password_hash"`
+	Role          models.UserRole `json:"role"`
+	WalletAddress string          `json:"wallet_address,omitempty"`
+	IdentityHash  string          `json:"identity_hash,omitempty"`
 }
 
 func (r *Repository) loadUsers() error {
@@ -34,11 +36,13 @@ func (r *Repository) loadUsers() error {
 		}
 
 		r.users[email] = &models.User{
-			ID:           stored.ID,
-			Name:         stored.Name,
-			Email:        email,
-			PasswordHash: stored.PasswordHash,
-			Role:         stored.Role,
+			ID:            stored.ID,
+			Name:          stored.Name,
+			Email:         email,
+			PasswordHash:  stored.PasswordHash,
+			Role:          stored.Role,
+			WalletAddress: stored.WalletAddress,
+			IdentityHash:  stored.IdentityHash,
 		}
 	}
 
@@ -49,6 +53,9 @@ func (r *Repository) SaveUser(user *models.User) error {
 	if user == nil || user.ID == uuid.Nil || (user.Role != models.RolePassenger && user.Role != models.RoleDriver) {
 		return errors.New("usuário inválido")
 	}
+
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
 
 	r.usersMu.Lock()
 	defer r.usersMu.Unlock()

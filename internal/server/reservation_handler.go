@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/consortium"
 	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/enum"
 	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/models"
 	"github.com/JoaoAnunciacaoDev/PBL---VaiJunto-Concorrencia-E-Conectividade/internal/protocol"
@@ -58,11 +59,28 @@ func (s *Server) handleConfirmReservation(payload json.RawMessage, session *Sess
 
 	// Se o coordenador 2PC estiver habilitado, executa o Two-Phase Commit distribuído
 	if s.coordinator != nil {
-		if err := s.coordinator.ConfirmItinerary(session.UserID, dto.Segments); err != nil {
+		reservationID := uuid.New()
+		passengerName := session.UserName
+		passengerEmail := ""
+		if u, uErr := s.repository.GetUserByID(session.UserID); uErr == nil {
+			if u.Name != "" {
+				passengerName = u.Name
+			}
+			passengerEmail = u.Email
+		}
+
+		bookingInfo := consortium.PassengerBookingInfo{
+			ReservationID:  reservationID,
+			PassengerID:    session.UserID,
+			PassengerName:  passengerName,
+			PassengerEmail: passengerEmail,
+		}
+
+		if err := s.coordinator.ConfirmItineraryWithPassenger(bookingInfo, dto.Segments); err != nil {
 			return protocol.Response{Success: "error", Message: err.Error()}
 		}
 
-		reservation, err := s.repository.RegisterConfirmedReservation(session.UserID, dto.Segments)
+		reservation, err := s.repository.RegisterConfirmedReservationWithID(reservationID, session.UserID, dto.Segments)
 		if err != nil {
 			return protocol.Response{Success: "error", Message: "Erro ao registrar reserva: " + err.Error()}
 		}
@@ -106,6 +124,7 @@ func (s *Server) reservationResponse(reservation models.Reservation) (protocol.R
 	for _, reservedSegment := range reservation.Segments {
 		var stage *models.Stage
 		var compID, driverName string
+		var driverID uuid.UUID
 		compID = reservedSegment.CompanyID
 		if compID == "" {
 			compID = s.companyID
@@ -114,6 +133,7 @@ func (s *Server) reservationResponse(reservation models.Reservation) (protocol.R
 		// Se a carona é local, busca do repositório local
 		ride, err := s.repository.GetRideByID(reservedSegment.RideID)
 		if err == nil {
+			driverID = ride.DriverID
 			driverName = ride.DriverName
 			if driverName == "" {
 				if d, dErr := s.repository.GetUserByID(ride.DriverID); dErr == nil {
@@ -151,6 +171,7 @@ func (s *Server) reservationResponse(reservation models.Reservation) (protocol.R
 				)
 			}
 
+			driverID = remoteRide.DriverID
 			driverName = remoteRide.DriverName
 
 			for index := range remoteRide.Segments {
@@ -170,25 +191,18 @@ func (s *Server) reservationResponse(reservation models.Reservation) (protocol.R
 			)
 		}
 
-		var origin, dest enum.City
-		var depAt, arrAt time.Time
-		var price int
-		origin = stage.Origin
-		dest = stage.Destination
-		depAt = stage.DepartureAt
-		arrAt = stage.ArrivalAt
-		price = stage.PriceCents
-
 		segments = append(segments, protocol.ReservationStageResponse{
 			RideID:      reservedSegment.RideID,
 			SegmentID:   reservedSegment.SegmentID,
 			CompanyID:   compID,
+			DriverID:    driverID,
 			DriverName:  driverName,
-			Origin:      origin,
-			Destination: dest,
-			DepartureAt: depAt,
-			ArrivalAt:   arrAt,
-			PriceCents:  price,
+			Status:      stage.GetStatus(),
+			Origin:      stage.Origin,
+			Destination: stage.Destination,
+			DepartureAt: stage.DepartureAt,
+			ArrivalAt:   stage.ArrivalAt,
+			PriceCents:  stage.PriceCents,
 		})
 	}
 
@@ -210,6 +224,44 @@ func (s *Server) handleCancelReservation(payload json.RawMessage, session *Sessi
 		return protocol.Response{Success: "error", Message: "Identificador da reserva inválido."}
 	}
 
+	reservation, err := s.repository.GetReservationByID(dto.ReservationID)
+	if err != nil {
+		return protocol.Response{Success: "error", Message: "Reserva não encontrada."}
+	}
+	if reservation.PassengerID != session.UserID {
+		return protocol.Response{Success: "error", Message: "Passageiro não pode cancelar esta reserva."}
+	}
+	if reservation.Status != enum.Confirmada {
+		return protocol.Response{Success: "error", Message: "Reserva não pode ser cancelada."}
+	}
+
+	var earliestDeparture time.Time
+	for _, seg := range reservation.Segments {
+		compID := seg.CompanyID
+		if compID == "" {
+			compID = s.companyID
+		}
+		ride, rErr := s.getRideLocalOrRemote(compID, seg.RideID)
+		if rErr != nil {
+			continue
+		}
+		rideStatus := ride.GetStatus()
+		if rideStatus == models.RideStatusInProgress || rideStatus == models.RideStatusCompleted || ride.IsSegmentCompleted(seg.SegmentID) {
+			return protocol.Response{
+				Success: "error",
+				Message: "Não é possível cancelar uma reserva cuja viagem ou trecho já foi iniciada ou concluída.",
+			}
+		}
+		for _, stage := range ride.Segments {
+			if stage.ID == seg.SegmentID {
+				if earliestDeparture.IsZero() || stage.DepartureAt.Before(earliestDeparture) {
+					earliestDeparture = stage.DepartureAt
+				}
+				break
+			}
+		}
+	}
+
 	segments, err := s.repository.CancelReservation(dto.ReservationID, session.UserID, s.companyID)
 	if err != nil {
 		return protocol.Response{Success: "error", Message: err.Error()}
@@ -217,14 +269,50 @@ func (s *Server) handleCancelReservation(payload json.RawMessage, session *Sessi
 
 	for _, seg := range segments {
 		if seg.CompanyID != "" && seg.CompanyID != s.companyID {
-			go s.releaseRemoteSegment(seg.CompanyID, seg.RideID, seg.SegmentID)
+			s.releaseRemoteSegmentWithRetry(seg.CompanyID, seg.RideID, seg.SegmentID, dto.ReservationID, session.UserID)
+		}
+	}
+
+	if !earliestDeparture.IsZero() && time.Until(earliestDeparture) < 2*time.Hour {
+		lateRecord := &models.Rating{
+			ID:            uuid.New(),
+			RideID:        segments[0].RideID,
+			ReservationID: dto.ReservationID,
+			AuthorID:      session.UserID,
+			AuthorName:    session.UserName,
+			TargetID:      session.UserID,
+			TargetName:    session.UserName,
+			Type:          models.RatingTypeLateCancellation,
+			Score:         0,
+			Comment:       "Cancelamento tardio efetuado com menos de 2 horas de antecedência da partida.",
+			CreatedAt:     time.Now(),
+		}
+		if err := s.repository.SaveRating(lateRecord); err != nil {
+			log.Printf("[cancel] falha ao registrar cancelamento tardio: %v", err)
+		} else {
+			s.replicateRatingToPeers(lateRecord)
 		}
 	}
 
 	return protocol.Response{Success: "success", Message: "Reserva cancelada com sucesso."}
 }
 
-func (s *Server) releaseRemoteSegment(companyID string, rideID, segmentID uuid.UUID) {
+func (s *Server) handleIncomingRemoteRideCancelled(reservationID uuid.UUID, cancelledCompanyID string) error {
+	segments, err := s.repository.CancelReservationByRideCancellation(reservationID, s.companyID)
+	if err != nil {
+		return err
+	}
+
+	for _, seg := range segments {
+		if seg.CompanyID != "" && seg.CompanyID != s.companyID && seg.CompanyID != cancelledCompanyID {
+			s.releaseRemoteSegmentWithRetry(seg.CompanyID, seg.RideID, seg.SegmentID, reservationID, uuid.Nil)
+		}
+	}
+
+	return nil
+}
+
+func (s *Server) releaseRemoteSegmentWithRetry(companyID string, rideID, segmentID, reservationID, passengerID uuid.UUID) {
 	if s.peers == nil {
 		return
 	}
@@ -234,32 +322,43 @@ func (s *Server) releaseRemoteSegment(companyID string, rideID, segmentID uuid.U
 		return
 	}
 
-	body, _ := json.Marshal(map[string]any{
+	payloadMap := map[string]any{
 		"ride_id":                rideID,
 		"coordinator_company_id": s.companyID,
-	})
+	}
+	if reservationID != uuid.Nil {
+		payloadMap["reservation_id"] = reservationID
+	}
+	if passengerID != uuid.Nil {
+		payloadMap["passenger_id"] = passengerID
+	}
+	body, _ := json.Marshal(payloadMap)
 
 	url := fmt.Sprintf("%s/internal/v1/segments/%s/release", peer.InternalURL, segmentID)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		log.Printf("[cancel] erro ao criar requisição de release para %s: %v", url, err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
+	for attempt := 1; attempt <= 3; attempt++ {
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			log.Printf("[cancel] erro ao criar requisição de release para %s: %v", url, err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		log.Printf("[cancel] falha ao notificar release do trecho %s para empresa %s: %v", segmentID, companyID, err)
-		return
-	}
-	defer resp.Body.Close()
+		resp, err := s.httpClient.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				log.Printf("[cancel] assento do trecho %s liberado com sucesso na empresa %s", segmentID, companyID)
+				return
+			}
+			log.Printf("[cancel] tentativa %d release trecho %s na empresa %s retornou HTTP %d", attempt, segmentID, companyID, resp.StatusCode)
+		} else {
+			log.Printf("[cancel] tentativa %d falha ao notificar release trecho %s para empresa %s: %v", attempt, segmentID, companyID, err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("[cancel] release do trecho %s na empresa %s retornou status HTTP %d", segmentID, companyID, resp.StatusCode)
-		return
+		if attempt < 3 {
+			time.Sleep(150 * time.Millisecond)
+		}
 	}
-
-	log.Printf("[cancel] assento do trecho %s liberado com sucesso na empresa %s", segmentID, companyID)
 }
 
 func reservationResponse(data any, message string) protocol.Response {
@@ -272,27 +371,27 @@ func reservationResponse(data any, message string) protocol.Response {
 }
 
 func (s *Server) fetchRemoteRide(baseURL string, rideID uuid.UUID) (*models.Ride, error) {
-    url := fmt.Sprintf("%s/internal/v1/rides/%s", baseURL, rideID)
+	url := fmt.Sprintf("%s/internal/v1/rides/%s", baseURL, rideID)
 
-    req, err := http.NewRequest(http.MethodGet, url, nil)
-    if err != nil {
-        return nil, err
-    }
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
 
-    resp, err := s.httpClient.Do(req)
-    if err != nil {
-        return nil, err
-    }
-    defer resp.Body.Close()
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
 
-    if resp.StatusCode != http.StatusOK {
-        return nil, fmt.Errorf("peer retornou status %d para carona %s", resp.StatusCode, rideID)
-    }
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("peer retornou status %d para carona %s", resp.StatusCode, rideID)
+	}
 
-    var ride models.Ride
-    if err := json.NewDecoder(resp.Body).Decode(&ride); err != nil {
-        return nil, err
-    }
+	var ride models.Ride
+	if err := json.NewDecoder(resp.Body).Decode(&ride); err != nil {
+		return nil, err
+	}
 
-    return &ride, nil
+	return &ride, nil
 }

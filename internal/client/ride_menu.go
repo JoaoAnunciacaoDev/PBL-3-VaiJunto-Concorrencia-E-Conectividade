@@ -29,6 +29,7 @@ func rideMenu(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) enum.
 		fmt.Fprintln(output, "7 - Concluir carona inteira")
 		fmt.Fprintln(output, "8 - Reportar ausência (No-Show)")
 		fmt.Fprintln(output, "9 - Avaliar passageiro")
+		fmt.Fprintln(output, "10 - Registrar denúncia")
 		fmt.Fprintln(output, "0 - Voltar")
 
 		choice, err := readLine(input, output, "Opção: ")
@@ -120,6 +121,16 @@ func rideMenu(tcpClient *TCPClient, input *bufio.Reader, output io.Writer) enum.
 		case "9":
 			utils.ClearTerminal()
 			if !ratePassenger(tcpClient, input, output) {
+				return enum.MenuDisconnected
+			}
+			if !waitForEnter(input, output) {
+				return enum.MenuBack
+			}
+			utils.ClearTerminal()
+
+		case "10":
+			utils.ClearTerminal()
+			if !fileDriverComplaint(tcpClient, input, output) {
 				return enum.MenuDisconnected
 			}
 			if !waitForEnter(input, output) {
@@ -343,7 +354,11 @@ func listRidePassengers(tcpClient *TCPClient, input *bufio.Reader, output io.Wri
 			continue
 		}
 		for _, passenger := range segment.Passengers {
-			fmt.Fprintf(output, "- %s <%s>\n", passenger.Name, passenger.Email)
+			companySuffix := ""
+			if passenger.CompanyID != "" {
+				companySuffix = fmt.Sprintf(" [%s]", passenger.CompanyID)
+			}
+			fmt.Fprintf(output, "- %s <%s>%s\n", passenger.Name, passenger.Email, companySuffix)
 		}
 	}
 
@@ -358,7 +373,7 @@ func chooseRide(tcpClient *TCPClient, input *bufio.Reader, output io.Writer, onl
 
 	availableRides := make([]models.Ride, 0, len(rides))
 	for _, ride := range rides {
-		if !onlyActive || !ride.Cancelled {
+		if !onlyActive || ride.CanCancel() {
 			availableRides = append(availableRides, ride)
 		}
 	}
@@ -503,15 +518,38 @@ func printRideSummary(output io.Writer, departureAt time.Time, segments []protoc
 	}
 }
 
-func printRide(output io.Writer, ride models.Ride) {
-	status := "Ativa"
-	if ride.Cancelled {
-		status = "Cancelada"
+func rideStatusLabel(status models.RideStatus) string {
+	switch status {
+	case models.RideStatusInProgress:
+		return "Em andamento"
+	case models.RideStatusCompleted:
+		return "Concluída"
+	case models.RideStatusCompletedNoShow:
+		return "Concluída (No-Show)"
+	case models.RideStatusCancelled:
+		return "Cancelada"
+	default:
+		return "Agendada"
 	}
+}
+
+func stageStatusLabel(status models.StageStatus) string {
+	switch status {
+	case models.StageStatusCompleted:
+		return "Concluído"
+	case models.StageStatusInProgress:
+		return "Em andamento"
+	default:
+		return "Agendado"
+	}
+}
+
+func printRide(output io.Writer, ride models.Ride) {
+	status := rideStatusLabel(ride.GetStatus())
 
 	fmt.Fprintf(output, "\nID: %s\nPartida: %s\nStatus: %s\n", ride.ID, ride.DepartureAt.Format(rideDateTimeLayout), status)
 	for index, segment := range ride.Segments {
-		fmt.Fprintf(output, "%d. %s → %s | %s até %s | %s | %d assento(s) disponível(is)\n",
+		fmt.Fprintf(output, "%d. %s → %s | %s até %s | %s | %d assento(s) disponível(is) [%s]\n",
 			index+1,
 			segment.Origin,
 			segment.Destination,
@@ -519,6 +557,7 @@ func printRide(output io.Writer, ride models.Ride) {
 			segment.ArrivalAt.Format(rideDateTimeLayout),
 			formatCents(segment.PriceCents),
 			segment.AvailableSeats,
+			stageStatusLabel(segment.GetStatus()),
 		)
 	}
 	fmt.Fprintf(output, "Preço total da rota: %s\n", formatCents(ride.TotalPriceCents()))
